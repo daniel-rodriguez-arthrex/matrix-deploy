@@ -1,0 +1,23 @@
+{
+  "connection": {
+    "router_ip": "10.0.0.1",
+    "ssh_username": "your-ssh-user",
+    "ssh_port_base": 200,
+    "remote_config_path": "/usr/lib/node_modules/matrix.api/matrix.api.config.json",
+    "service_name": "matrix-api",
+    "swu_service_port": 8080,
+    "same_physical_host": true
+  },
+  "artifactory": {
+    "url": "https://your-artifactory.example.com/artifactory",
+    "repo": "your-repo-name",
+    "build_path": "path/to/builds",
+    "build_name": "Embedded Builder",
+    "branch_filter": "main"
+  },
+  "rooms": [
+    { "number": 1, "room_id": "10.0.1.12", "name": "OR 1" },
+    { "number": 2, "room_id": "10.0.2.12", "name": "OR 2" },
+    { "number": 3, "room_id": "10.0.3.12", "name": "OR 3" }
+  ]
+}

@@ -1,0 +1,172 @@
+{
+  "logConfig": {
+    "name": "matrix.api",
+    "streams": [
+      {
+        "level": "info"
+      }
+    ]
+  },
+  "apiServer": {
+    "ssl": false,
+    "serverPort": "443",
+    "certKey": "./server-key.pem",
+    "cert": "./server-cert.pem",
+    "apiKey": "REPLACE_ME_API_KEY",
+    "icKey": "REPLACE_ME_IC_KEY",
+    "masterPairKey": "REPLACE_ME_PAIR_KEY",
+    "trustedEndPoints": [
+      "127.0.0.1",
+      "10.0.0.1",
+      "::1",
+      "localhost"
+    ],
+    "nms": {
+      "username": "admin",
+      "password": "REPLACE_ME_NMS_PASSWORD",
+      "url": "https://10.0.1.12:8443"
+    },
+    "helpFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
+    "appFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
+    "supportBundlePath": "/temp/supportDump"
+  },
+  "appSettings": {
+    "siteCode": "0000",
+    "enableStreaming": true,
+    "enableExternalSourceStreaming": false,
+    "extronDevices": [
+      {
+        "ip": "10.0.0.1",
+        "port": 13001,
+        "username": "admin",
+        "password": "REPLACE_ME_EXTRON_PASSWORD"
+      }
+    ],
+    "datadogRumConfig": {
+      "applicationId": "",
+      "clientToken": "",
+      "site": "datadoghq.com",
+      "service": "",
+      "env": "",
+      "sampleRate": 100,
+      "trackInteractions": true,
+      "proxyHost": ""
+    },
+    "notificationDurations": {
+      "shareEventTimeOut": 300000,
+      "generalEventTimeOut": 86400000,
+      "pairTokenEvent": 5000,
+      "toastMessage": 3000
+    },
+    "adminTimeOut": 50000,
+    "schedulers": {
+      "removeExpiredShares": 300000
+    },
+    "switch": {
+      "bandwidth": 40
+    },
+    "camera": {
+      "preview": "image",
+      "movestep": "05",
+      "zoomstep": "05",
+      "refreshRate": 1000,
+      "statusCheckTime": {
+        "online": 20,
+        "offline": 3
+      }
+    },
+    "localization": {
+      "languages": [
+        {
+          "name": "English",
+          "code": "en"
+        }
+      ],
+      "dateFormats": [
+        "MM/DD/YYYY",
+        "MM-DD-YYYY",
+        "MM.DD.YYYY",
+        "DD/MM/YYYY",
+        "DD-MM-YYYY",
+        "DD.MM.YYYY",
+        "DD.MM.YY",
+        "YY.MM.DD",
+        "MM.DD.YY"
+      ]
+    }
+  },
+  "about": [
+    {
+      "key": "os",
+      "component": "System",
+      "info": "Linux (Matrix)"
+    },
+    {
+      "key": "api_version",
+      "component": "Matrix Api",
+      "info": "1.0.0"
+    },
+    {
+      "key": "app_version",
+      "component": "Matrix App",
+      "info": "1.0.0"
+    }
+  ],
+  "room": {
+    "roomId": "10.0.1.12",
+    "localization": {
+      "lang": "en",
+      "dateFormat": "MMM-DD-YYYY"
+    },
+    "appFeatures": [
+      {
+        "name": "routing",
+        "icon": "matrix",
+        "title": "Matrix Routing",
+        "enabled": true
+      },
+      {
+        "name": "roomCam",
+        "icon": "camera",
+        "title": "Room Camera",
+        "enabled": true
+      },
+      {
+        "name": "synergyVision",
+        "icon": "synergyVision",
+        "title": "Synergy Vision",
+        "enabled": true
+      },
+      {
+        "name": "extApps",
+        "icon": "external_apps",
+        "title": "Apps",
+        "enabled": true
+      },
+      {
+        "name": "lighting",
+        "icon": "lights",
+        "title": "Boom Lights",
+        "enabled": false
+      }
+    ],
+    "admin": {
+      "username": "admin"
+    },
+    "externalApps": []
+  },
+  "interOperatingRooms": [
+    {
+      "roomId": "10.0.1.12",
+      "apiURL": "https://10.0.1.12:443"
+    },
+    {
+      "roomId": "10.0.2.12",
+      "apiURL": "https://10.0.2.12:443"
+    },
+    {
+      "roomId": "10.0.3.12",
+      "apiURL": "https://10.0.3.12:443"
+    }
+  ]
+}

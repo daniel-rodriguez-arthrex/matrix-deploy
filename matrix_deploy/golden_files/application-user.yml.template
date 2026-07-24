@@ -1,0 +1,26 @@
+# Packaged default keeps NMS on loopback until first-boot config sync can
+# safely derive a single active ethernet address. If network discovery is
+# ambiguous or unavailable, this fallback avoids breaking NMS startup.
+nexxis:
+  ip: __IP__
+  dns: matrix.local
+  device:
+    multicast:
+      cidr: 239.1.1.0/24
+  interor:
+    enabled: true
+    bandwidth:
+      upload: __BANDWIDTH__
+      download: __BANDWIDTH__
+  overlay:
+    empty:
+      slot:
+        color: "#000000"
+  rootDir: /opt/barco/nms
+  configDir: /etc/barco/nms
+  logging:
+    folder: /var/log/barco/nms
+  data:
+    folder: /etc/barco/nms/database
+  versions:
+    path: /opt/barco/nms/app/static/versions.json

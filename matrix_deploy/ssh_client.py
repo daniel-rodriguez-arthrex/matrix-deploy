@@ -1,0 +1,171 @@
+"""Shared SSH/SCP helpers built on paramiko.
+
+All deployment logic uses this module so connection handling lives in one place.
+"""
+
+from __future__ import annotations
+
+import socket
+import time
+from dataclasses import dataclass
+from typing import Callable, Optional
+
+import paramiko
+from scp import SCPClient
+
+# Logger callback signature: log(message: str, level: str)
+# level is one of: info, success, warning, error, detail
+Logger = Callable[[str, str], None]
+# Progress callback signature: progress(sent: int, total: int)
+Progress = Callable[[int, int], None]
+
+
+@dataclass
+class SSHTarget:
+    host: str
+    port: int
+    username: str
+    password: Optional[str] = None
+
+
+class SSHError(Exception):
+    """Raised when an SSH operation fails."""
+
+
+def connect(target: SSHTarget, timeout: int = 10) -> paramiko.SSHClient:
+    """Connect using an SSH key first, falling back to password.
+
+    Raises ``SSHError`` with a descriptive message if both methods fail.
+    """
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+    key_error: Optional[Exception] = None
+    try:
+        client.connect(
+            hostname=target.host,
+            port=target.port,
+            username=target.username,
+            timeout=timeout,
+            look_for_keys=True,
+            allow_agent=True,
+        )
+        return client
+    except Exception as exc:  # noqa: BLE001 - we re-raise with context below
+        key_error = exc
+
+    if not target.password:
+        raise SSHError(
+            f"SSH key auth failed for {target.username}@{target.host}:{target.port} "
+            f"and no password was provided ({key_error})"
+        )
+
+    try:
+        client.connect(
+            hostname=target.host,
+            port=target.port,
+            username=target.username,
+            password=target.password,
+            timeout=timeout,
+        )
+        return client
+    except Exception as exc:  # noqa: BLE001
+        raise SSHError(
+            f"SSH auth failed for {target.username}@{target.host}:{target.port}: {exc}"
+        ) from exc
+
+
+def run_command(
+    client: paramiko.SSHClient,
+    command: str,
+    get_pty: bool = False,
+    on_line: Optional[Callable[[str], None]] = None,
+) -> int:
+    """Run a remote command, optionally streaming stdout line-by-line.
+
+    Returns the remote exit status. stderr is merged into the stream when
+    ``get_pty`` is True; otherwise it is appended after stdout.
+    """
+    stdin, stdout, stderr = client.exec_command(command, get_pty=get_pty)
+    if on_line is not None:
+        for raw in stdout:
+            # PTY sessions terminate lines with "\r\n"; strip both so a
+            # trailing "\r" doesn't render as a blank line downstream.
+            on_line(raw.rstrip("\r\n"))
+    exit_status = stdout.channel.recv_exit_status()
+    if on_line is not None and not get_pty:
+        err = stderr.read().decode(errors="replace").strip()
+        if err:
+            on_line(err)
+    return exit_status
+
+
+def upload_file(
+    client: paramiko.SSHClient,
+    local_path: str,
+    remote_path: str,
+    progress: Optional[Progress] = None,
+) -> None:
+    """Upload a file via SCP with an optional progress callback."""
+
+    def _cb(filename, size, sent):  # noqa: ANN001 - paramiko/scp signature
+        if progress is not None:
+            progress(sent, size)
+
+    with SCPClient(client.get_transport(), progress=_cb if progress else None) as scp:
+        scp.put(local_path, remote_path)
+
+
+def port_is_open(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Return True if a TCP connection to host:port succeeds."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(timeout)
+    try:
+        return sock.connect_ex((host, port)) == 0
+    finally:
+        sock.close()
+
+
+def wait_for_reboot(
+    target: SSHTarget,
+    log: Logger,
+    is_cancelled: Callable[[], bool],
+    max_wait_minutes: int = 5,
+    settle_seconds: int = 10,
+) -> bool:
+    """Wait for a host to reboot and accept SSH again.
+
+    1. Sleep ``settle_seconds`` so the box has time to start going down.
+    2. Poll the SSH port; once open, verify a real SSH handshake succeeds.
+
+    Returns True when SSH is reachable again, False on timeout/cancel.
+    """
+    log("Waiting for system to start rebooting...", "detail")
+    for _ in range(settle_seconds):
+        if is_cancelled():
+            return False
+        time.sleep(1)
+
+    log("Waiting for system to come back online...", "detail")
+    max_attempts = max_wait_minutes * 12  # poll every 5 seconds
+
+    for attempt in range(max_attempts):
+        if is_cancelled():
+            return False
+
+        if port_is_open(target.host, target.port):
+            time.sleep(5)  # give sshd a moment to fully accept logins
+            try:
+                client = connect(target, timeout=5)
+                client.close()
+                return True
+            except SSHError:
+                pass  # keep polling
+
+        if attempt % 6 == 0:
+            elapsed_min = (attempt * 5) // 60
+            log(f"  Still waiting... ({elapsed_min} min elapsed)", "detail")
+
+        time.sleep(5)
+
+    return False

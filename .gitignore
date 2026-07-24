@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local environment / secrets
+.env
+
+# TLS/CA key material - never commit private keys or certs
+*.key
+*.pem
+
+# Site-specific config - copy config/deploy_config.example.json instead
+config/deploy_config.json
+
+# Personal config template scratch files (may contain real credentials
+# pasted in during testing) - copy matrix_deploy/template/example.config.json
+matrix_deploy/template/*.json
+!matrix_deploy/template/example.config.json
+
+# Local artifacts
+*.swu
+*.part
+build/
+dist/
+
+# OS
+.DS_Store
+Thumbs.db

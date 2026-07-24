@@ -1,0 +1,90 @@
+{
+  "ensureWallLayoutTemplate": {
+    "id": "wall_layout",
+    "name": "Wall Layout",
+    "layoutTemplateSlots": [
+      {
+        "id": "one",
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1,
+        "mirrorVertically": false,
+        "mirrorHorizontally": false,
+        "gravity": "CENTER_MIDDLE",
+        "zOrder": 1
+      },
+      {
+        "id": "two",
+        "x": 0.666667,
+        "y": 0,
+        "width": 0.333333,
+        "height": 0.333333,
+        "mirrorVertically": false,
+        "mirrorHorizontally": false,
+        "gravity": "CENTER_MIDDLE",
+        "zOrder": 2
+      },
+      {
+        "id": "three",
+        "x": 0.666667,
+        "y": 0.666667,
+        "width": 0.333333,
+        "height": 0.333333,
+        "mirrorVertically": false,
+        "mirrorHorizontally": false,
+        "gravity": "CENTER_MIDDLE",
+        "zOrder": 3
+      }
+    ]
+  },
+  "PipTopRightLayout": {
+    "id": "pip_top_right_layout",
+    "name": "PIP Top Right Layout",
+    "layoutTemplateSlots": [
+      {
+        "id": "one",
+        "x": 0,
+        "y": 0,
+        "width": 1,
+        "height": 1,
+        "mirrorVertically": false,
+        "mirrorHorizontally": false,
+        "gravity": "CENTER_MIDDLE",
+        "zOrder": 1
+      },
+      {
+        "id": "two",
+        "x": 0.666667,
+        "y": 0,
+        "width": 0.333333,
+        "height": 0.333333,
+        "mirrorVertically": false,
+        "mirrorHorizontally": false,
+        "gravity": "CENTER_MIDDLE",
+        "zOrder": 2
+      }
+    ]
+  },
+  "externalSourceOverlay": {
+    "enabled": true,
+    "templateId": "matrix_external_source",
+    "parameterKey": "matrixExternalSourceName",
+    "style": [
+      { "name": "top", "value": "3%" },
+      { "name": "left", "value": "0" },
+      { "name": "right", "value": "0" },
+      { "name": "position", "value": "absolute" },
+      { "name": "text-align", "value": "center" },
+      { "name": "font-weight", "value": "bold" },
+      { "name": "font-size", "value": "1.5em" },
+      { "name": "font-family", "value": "Verdana" },
+      { "name": "color", "value": "white" },
+      { "name": "text-shadow", "value": "0 0 10px black" },
+      { "name": "z-index", "value": "10" }
+    ]
+  },
+  "videoSourceSharing": {
+    "bandwidth": "MAX"
+  }
+}
