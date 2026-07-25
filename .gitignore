@@ -26,9 +26,6 @@ matrix_deploy/template/*.json
 build/
 dist/
 
-# Personal notes / scratch docs
-BUG_REPORT.md
-
 # OS
 .DS_Store
 Thumbs.db
