@@ -106,10 +106,24 @@ def upload_file(
     remote_path: str,
     progress: Optional[Progress] = None,
 ) -> None:
-    """Upload a file via SCP with an optional progress callback."""
+    """Upload a file via SCP with an optional, rate-limited progress callback.
+
+    ``scp`` invokes its progress callback once per internal read chunk (as
+    small as 16KB), which can fire tens of thousands of times for a large
+    SWU file. Forwarding every call straight through (e.g. to a Qt signal)
+    floods the receiver - especially with several rooms uploading in
+    parallel - and can make the UI appear to hang even though the transfer
+    itself is progressing fine. Throttle to a sane update rate instead.
+    """
+    last_emit = 0.0
 
     def _cb(filename, size, sent):  # noqa: ANN001 - paramiko/scp signature
-        if progress is not None:
+        nonlocal last_emit
+        if progress is None:
+            return
+        now = time.monotonic()
+        if sent >= size or now - last_emit >= 0.15:
+            last_emit = now
             progress(sent, size)
 
     with SCPClient(client.get_transport(), progress=_cb if progress else None) as scp:

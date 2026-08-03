@@ -6,7 +6,7 @@
     "remote_config_path": "/usr/lib/node_modules/matrix.api/matrix.api.config.json",
     "service_name": "matrix-api",
     "swu_service_port": 8080,
-    "same_physical_host": true
+    "same_physical_host": false
   },
   "artifactory": {
     "url": "https://your-artifactory.example.com/artifactory",

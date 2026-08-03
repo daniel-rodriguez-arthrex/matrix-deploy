@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import shlex
+import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -470,27 +471,32 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def get_nms_password(self, room: Room) -> bool:
-        """Connect to a room, run ``sudo act-mfg-eeprom display``, and log the
-        parsed ``barco_nms_password`` (the default NMS login password)."""
-        self.log(f"=== OR {room.number}: NMS Password ===", "info")
+    def fetch_nms_password(self, room: Room) -> Optional[str]:
+        """Connect to a room and return the parsed ``barco_nms_password``
+        (the default NMS/admin login password), or ``None`` on failure."""
         try:
             client = connect(self._target(room))
         except SSHError as exc:
             self.log(str(exc), "error")
-            return False
+            return None
         try:
-            password = self._fetch_room_password(client, room)
-            if password:
-                self.log(f"OR {room.number} ({room.name}): NMS password = {password}", "success")
-                return True
-            self.log(f"OR {room.number} ({room.name}): NMS password not found.", "error")
-            return False
+            return self._fetch_room_password(client, room)
         finally:
             try:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def get_nms_password(self, room: Room) -> bool:
+        """Connect to a room, run ``sudo act-mfg-eeprom display``, and log the
+        parsed ``barco_nms_password`` (the default NMS login password)."""
+        self.log(f"=== OR {room.number}: NMS Password ===", "info")
+        password = self.fetch_nms_password(room)
+        if password:
+            self.log(f"OR {room.number} ({room.name}): NMS password = {password}", "success")
+            return True
+        self.log(f"OR {room.number} ({room.name}): NMS password not found.", "error")
+        return False
 
     def view_matrix_config(self, room: Room, dest_dir: Optional[Path] = None) -> bool:
         """Cat the matrix.api.config.json on a room, stream it to the log, and
@@ -687,6 +693,158 @@ class Deployer:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def deploy_matrix_api_certs(self, room: Room) -> bool:
+        """Disable the cert-init/unseal units, generate a fresh self-signed
+        matrix.api server cert/key pair, fix ownership/permissions, and
+        restart the matrix-api service so it picks up the new cert."""
+        self.log(f"=== OR {room.number}: Regenerating matrix-api certs ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            conn = self.config.connection
+            sudo = self._sudo_prefix()
+            cert_dir = "/usr/lib/node_modules/matrix.api"
+            key_path = f"{cert_dir}/server-key.pem"
+            cert_path = f"{cert_dir}/server-cert.pem"
+            subj = "/C=US/O=Arthrex/OU=Engineering/CN=Arthrex Matrix API"
+            san = (
+                "subjectAltName=DNS:$(hostname),DNS:$(hostname -s),"
+                "DNS:localhost,IP:127.0.0.1,IP:::1"
+            )
+            cmd = (
+                f"{sudo} systemctl disable --now "
+                f"matrix-api-certs-init.service matrix-api-certs-unseal.service "
+                f"&& {sudo} install -d -m 0755 {shlex.quote(cert_dir)} "
+                f"&& {sudo} openssl req -x509 -newkey rsa:2048 -nodes -days 3650 "
+                f"-keyout {shlex.quote(key_path)} -out {shlex.quote(cert_path)} "
+                f'-subj "{subj}" '
+                f'-addext "{san}" '
+                f'-addext "keyUsage=critical,digitalSignature,keyEncipherment" '
+                f'-addext "extendedKeyUsage=serverAuth" '
+                f"&& {sudo} chown act-app:act-app {shlex.quote(key_path)} {shlex.quote(cert_path)} "
+                f"&& {sudo} chmod 600 {shlex.quote(key_path)} "
+                f"&& {sudo} chmod 644 {shlex.quote(cert_path)} "
+                f"&& {sudo} sed -i "
+                f"'s/Requires=matrix-api-certs-unseal\\.service/#Requires=matrix-api-certs-unseal.service/' "
+                f"/usr/lib/systemd/system/matrix-api.service "
+                f"&& {sudo} systemctl restart {shlex.quote(conn.service_name)}"
+            )
+            exit_status = run_command(
+                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+            )
+            self._advance()
+            if exit_status != 0:
+                self.log("Failed to regenerate matrix-api certs.", "error")
+                return False
+            self.log(f"OR {room.number}: matrix-api certs regenerated.", "success")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def fix_room_config_race(self, room: Room) -> bool:
+        """Patch matrix-room-config-generator.service's ``After=`` ordering to
+        also wait on barco-nms-network-init.service.
+
+        Without this, matrix-room-config-generator can start before barco-nms
+        has assigned the room's IP, causing it to grab the wrong/incorrect
+        address (race condition). The sed is idempotent - a second run is a
+        harmless no-op once the line has already been patched. Takes effect
+        on the unit's next start (e.g. next reboot); does not restart
+        anything itself.
+        """
+        self.log(
+            f"=== OR {room.number}: Patching matrix-room-config-generator "
+            "service ordering ===",
+            "info",
+        )
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            sudo = self._sudo_prefix()
+            unit = "/usr/lib/systemd/system/matrix-room-config-generator.service"
+            cmd = (
+                f"{sudo} sed -i "
+                f"'s/^After=barco-nms\\.service redis\\.service "
+                f"act-kiosk-redis-svc\\.service$/After=barco-nms.service "
+                f"barco-nms-network-init.service redis.service "
+                f"act-kiosk-redis-svc.service/' {shlex.quote(unit)} "
+                f"&& {sudo} systemctl daemon-reload "
+                f"&& grep -n '^After=' {shlex.quote(unit)}"
+            )
+            exit_status = run_command(
+                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+            )
+            self._advance()
+            if exit_status != 0:
+                self.log("Failed to patch matrix-room-config-generator.service.", "error")
+                return False
+            self.log(
+                f"OR {room.number}: race-condition fix applied "
+                "(takes effect next start/reboot).",
+                "success",
+            )
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def remove_known_hosts_entry(self, room: Room) -> bool:
+        """Remove any cached SSH host key for this room's host:port from the
+        local known_hosts file (equivalent to ``ssh-keygen -R "[host]:port"``).
+
+        Useful when the remote host key has changed and a manual ``ssh``/``scp``
+        connection from this machine fails with "REMOTE HOST IDENTIFICATION
+        HAS CHANGED". This is a local-only operation; it does not connect to
+        the room.
+        """
+        conn = self.config.connection
+        port = room.ssh_port(conn.ssh_port_base)
+        target = f"[{conn.router_ip}]:{port}"
+        self.log(
+            f"=== OR {room.number}: Removing cached SSH fingerprint for {target} ===",
+            "info",
+        )
+        try:
+            result = subprocess.run(
+                ["ssh-keygen", "-R", target],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except FileNotFoundError:
+            self.log(
+                "ssh-keygen not found on this system (requires the OpenSSH client).",
+                "error",
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Failed to run ssh-keygen: {exc}", "error")
+            return False
+
+        output = ((result.stdout or "") + (result.stderr or "")).strip()
+        for line in output.splitlines():
+            self.log(line, "detail")
+
+        if result.returncode != 0:
+            self.log(f"ssh-keygen exited with code {result.returncode}.", "error")
+            return False
+
+        self.log(f"OR {room.number}: fingerprint entry removed (if it existed).", "success")
+        return True
 
     def _sudo_prefix(self) -> str:
         """Return a sudo invocation that supplies the password when available."""

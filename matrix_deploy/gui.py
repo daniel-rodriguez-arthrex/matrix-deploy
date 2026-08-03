@@ -7,8 +7,10 @@ threads and the Qt-free service modules.
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 import time
+import webbrowser
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -30,7 +32,10 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QSplitter,
     QStyle,
+    QTabBar,
+    QTabWidget,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -41,7 +46,13 @@ from .artifactory import ArtifactoryCredentials
 from .config import AppConfig, Room
 from .deployer import DeploymentCredentials
 from .env_settings import load_env_secrets, load_env_settings
-from .workers import DeploymentWorker, DownloadWorker, SystemActionWorker
+from .workers import (
+    DeploymentWorker,
+    DownloadWorker,
+    LogTailWorker,
+    OpenRoomGuiWorker,
+    SystemActionWorker,
+)
 
 SETTINGS_FILE = Path.home() / ".matrix_deploy_settings.json"
 CACHE_DIR = Path.home() / "Desktop" / "latest-matrix-wrynose"
@@ -54,6 +65,19 @@ LEVEL_COLORS = {
     "info": "#22b8cf",
     "detail": "#868e96",
 }
+
+# (label, max rooms in flight at once; None = all selected rooms at once)
+CONCURRENCY_OPTIONS: List[tuple] = [
+    ("Sequential (1 at a time)", 1),
+    ("2 at a time", 2),
+    ("3 at a time", 3),
+    ("4 at a time", 4),
+    ("6 at a time", 6),
+    ("All in parallel", None),
+]
+# 3-at-a-time balances throughput against router/uplink bandwidth and
+# per-room SSH/SCP overhead better than "all rooms at once" for large fleets.
+DEFAULT_CONCURRENCY_INDEX = 2
 
 STATUS_BADGES = {
     "pending": ("PENDING", "#868e96"),
@@ -230,23 +254,165 @@ SECTION_LABEL_STYLE = (
     "border-bottom:2px solid #90CAF9; padding-bottom:3px;"
 )
 
+_CONSOLE_STYLE = (
+    "QTextEdit { background-color:#1e1e1e; color:#d4d4d4;"
+    "border:1px solid #37474F; border-radius:6px; padding:6px;"
+    "font-family:'Consolas','Courier New',monospace; }"
+    "QScrollBar:vertical { background:#1e1e1e; width:12px; margin:0; }"
+    "QScrollBar::handle:vertical { background:#555b62; border-radius:6px; min-height:24px; }"
+    "QScrollBar::handle:vertical:hover { background:#6b7280; }"
+    "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
+)
+
+
+def _make_console() -> QTextEdit:
+    console = QTextEdit()
+    console.setReadOnly(True)
+    console.setMinimumHeight(200)
+    console.setLineWrapMode(QTextEdit.WidgetWidth)
+    console.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    console.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    console.setStyleSheet(_CONSOLE_STYLE)
+    # (stamp, message) pairs kept in parallel with the rich-text view, so
+    # Copy can rebuild a clean "[HH:MM:SS] message" line (our own tag, no
+    # journalctl noise) without re-scraping HTML.
+    console._raw_lines = []
+    return console
+
+
+def _append_console(console: QTextEdit, message: str, level: str) -> None:
+    color = LEVEL_COLORS.get(level, "#d4d4d4")
+    stamp = time.strftime("%H:%M:%S")
+    console.append(
+        f'<span style="color:#5c6773;">[{stamp}]</span> '
+        f'<span style="color:{color};">{message}</span>'
+    )
+    console.moveCursor(QTextCursor.End)
+    console._raw_lines.append((stamp, message))
+
+
+_JOURNAL_PREFIX_RE = re.compile(
+    r"^[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\S+\s+[^\s\[:]+(?:\[\d+\])?:\s*"
+)
+
+
+def _strip_journal_prefix(line: str) -> str:
+    """Strip journalctl's own 'MMM DD HH:MM:SS host process[pid]:' prefix,
+    if present, leaving just the message. Lines that don't match (banners,
+    our own info/success messages, etc.) are returned unchanged."""
+    return _JOURNAL_PREFIX_RE.sub("", line, count=1)
+
+
+def _copy_raw(console: QTextEdit) -> None:
+    """Copy the console's content as '[HH:MM:SS] message', stripping
+    journalctl's own per-line timestamp/host/process prefix (which is
+    redundant noise) but keeping our own shorthand time tag."""
+    lines = [
+        f"[{stamp}] {_strip_journal_prefix(message)}"
+        for stamp, message in console._raw_lines
+    ]
+    QApplication.clipboard().setText("\n".join(lines))
+
+
+class _JobPanel(QWidget):
+    """One tab: header (status + copy/cancel), progress bar, and a console.
+
+    Represents a single launched job (a deployment, a system action, or a
+    download) and owns the widgets that render that job's output/progress.
+    """
+
+    def __init__(self, title: str, on_cancel) -> None:
+        super().__init__()
+        self.title = title
+        self.worker = None
+        self.rooms: List[Room] = []
+        self.finished = False
+        self.total_rooms = 0
+        self._completed = 0
+        self.had_failure = False
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        self.status_label = QLabel("Running\u2026")
+        self.status_label.setStyleSheet("font-weight:700; color:#ffd43b;")
+        header.addWidget(self.status_label)
+        header.addStretch()
+
+        copy_btn = QPushButton("Copy")
+        copy_btn.setCursor(Qt.PointingHandCursor)
+        copy_btn.setStyleSheet(_button_style(BTN_COLORS["utility"]))
+        copy_btn.clicked.connect(self._copy)
+        header.addWidget(copy_btn)
+
+        self.cancel_btn = QPushButton("Cancel")
+        self.cancel_btn.setCursor(Qt.PointingHandCursor)
+        self.cancel_btn.setStyleSheet(_button_style(BTN_COLORS["danger"]))
+        self.cancel_btn.clicked.connect(on_cancel)
+        header.addWidget(self.cancel_btn)
+        layout.addLayout(header)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+
+        self.console = _make_console()
+        layout.addWidget(self.console, stretch=1)
+
+    def _copy(self) -> None:
+        _copy_raw(self.console)
+
+    def append(self, message: str, level: str = "detail") -> None:
+        _append_console(self.console, message, level)
+
+    def set_progress(self, sent: int, total: int) -> None:
+        if total > 0:
+            self.progress.setValue(int(sent / total * 100))
+
+    def room_completed(self, ok: bool) -> None:
+        self._completed += 1
+        if not ok:
+            self.had_failure = True
+        if self.total_rooms:
+            self.progress.setValue(int(self._completed / self.total_rooms * 100))
+
+    def mark_finished(self, ok: bool) -> None:
+        self.finished = True
+        self.cancel_btn.setEnabled(False)
+        self.progress.setRange(0, 100)  # exit indeterminate mode, if it was set
+        if ok:
+            self.status_label.setText("Completed")
+            self.status_label.setStyleSheet("font-weight:700; color:#51cf66;")
+            self.progress.setValue(100)
+        else:
+            self.status_label.setText("Finished with errors")
+            self.status_label.setStyleSheet("font-weight:700; color:#ff6b6b;")
+
 
 class MatrixDeployWindow(QMainWindow):
     def __init__(self, config: AppConfig):
         super().__init__()
         self.config = config
-        self.deploy_worker: Optional[DeploymentWorker] = None
-        self.download_worker: Optional[DownloadWorker] = None
-        self.system_action_worker: Optional[SystemActionWorker] = None
+        # Multiple jobs can run at once; each owns a tab (_JobPanel).
+        self._jobs: List[_JobPanel] = []
+        # Room numbers with an in-flight job, to prevent double-booking a room.
+        self._busy_rooms: set = set()
         self.room_checkboxes: Dict[int, QCheckBox] = {}
         self.room_status_labels: Dict[int, QLabel] = {}
         self.room_progress_bars: Dict[int, QProgressBar] = {}
+        self.room_open_gui_buttons: Dict[int, QPushButton] = {}
+        # Keep references to in-flight OpenRoomGuiWorker threads so they are
+        # not garbage-collected mid-run.
+        self._open_gui_workers: List[OpenRoomGuiWorker] = []
 
         self._last_action = "none"
 
         self.setWindowTitle("Matrix Deploy")
-        self.setGeometry(80, 60, 1320, 860)
-        self.setMinimumSize(1120, 680)
+        self.setGeometry(80, 40, 1400, 980)
+        self.setMinimumSize(1160, 760)
         self.setStyleSheet(build_app_stylesheet())
         self._build_ui()
         self._load_settings()
@@ -261,22 +427,42 @@ class MatrixDeployWindow(QMainWindow):
         root.setContentsMargins(16, 14, 16, 10)
         root.setSpacing(12)
 
-        root.addWidget(self._build_connection_group())
-        root.addWidget(self._build_files_group())
-        root.addLayout(self._build_options_row())
-        root.addLayout(self._build_action_row())
-        root.addLayout(self._build_controls_row())
+        # Connection/files/options/action controls, stacked in a single
+        # widget so they can be collapsed via the splitter below to make
+        # room for the output console.
+        controls = QWidget()
+        controls_layout = QVBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(12)
+        controls_layout.addWidget(self._build_connection_group())
+        controls_layout.addWidget(self._build_files_group())
+        controls_layout.addLayout(self._build_options_row())
+        controls_layout.addLayout(self._build_action_row())
+        controls_layout.addLayout(self._build_controls_row())
 
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        root.addWidget(self.progress_bar)
+        # Operating rooms and output sit side by side, user-resizable.
+        bottom_split = QSplitter(Qt.Horizontal)
+        bottom_split.addWidget(self._build_rooms_group())
+        bottom_split.addWidget(self._build_terminal_group())
+        bottom_split.setStretchFactor(0, 2)
+        bottom_split.setStretchFactor(1, 3)
+        bottom_split.setSizes([420, 700])
 
-        # Operating rooms and terminal sit side by side.
-        split = QHBoxLayout()
-        split.setSpacing(12)
-        split.addWidget(self._build_rooms_group(), stretch=2)
-        split.addWidget(self._build_terminal_group(), stretch=3)
-        root.addLayout(split, stretch=5)
+        # Controls stack on top; rooms/output take the rest by default but
+        # this bar can be dragged up to reclaim vertical space for a taller
+        # console - the actual complaint being addressed here.
+        main_split = QSplitter(Qt.Vertical)
+        main_split.addWidget(controls)
+        main_split.addWidget(bottom_split)
+        main_split.setStretchFactor(0, 0)
+        main_split.setStretchFactor(1, 1)
+        main_split.setCollapsible(0, True)
+        main_split.setCollapsible(1, False)
+        # Give controls just what it needs up front; drag the handle up to
+        # reclaim more of that space for the console below.
+        main_split.setSizes([controls.sizeHint().height(), 10_000])
+
+        root.addWidget(main_split)
 
     @staticmethod
     def _password_toggle(line_edit: QLineEdit) -> QToolButton:
@@ -432,11 +618,21 @@ class MatrixDeployWindow(QMainWindow):
         bar.setFixedHeight(14)
         self.room_progress_bars[room.number] = bar
 
+        open_gui_btn = QPushButton("Open GUI")
+        open_gui_btn.setToolTip(
+            "Open this room's NMS demonstrator GUI in your browser and fetch "
+            "its admin password"
+        )
+        open_gui_btn.setMinimumWidth(80)
+        open_gui_btn.clicked.connect(lambda _c=False, r=room: self._open_room_gui(r))
+        self.room_open_gui_buttons[room.number] = open_gui_btn
+
         row = QHBoxLayout()
         row.setContentsMargins(8, 4, 8, 4)
         row.addWidget(cb)
         row.addWidget(badge)
         row.addWidget(bar, stretch=1)
+        row.addWidget(open_gui_btn)
 
         wrapper = QWidget()
         wrapper.setLayout(row)
@@ -458,14 +654,25 @@ class MatrixDeployWindow(QMainWindow):
         self.operation_combo.setMinimumWidth(190)
         row.addWidget(self.operation_combo)
 
-        self.sequential_checkbox = QCheckBox("Deploy sequentially (recommended)")
-        self.sequential_checkbox.setChecked(True)
-        self.sequential_checkbox.setToolTip(
-            "All rooms share one physical host; sequential avoids /tmp and reboot contention."
+        row.addWidget(QLabel("Concurrency:"))
+        self.concurrency_combo = QComboBox()
+        self.concurrency_combo.addItems([label for label, _ in CONCURRENCY_OPTIONS])
+        self.concurrency_combo.setCurrentIndex(DEFAULT_CONCURRENCY_INDEX)
+        self.concurrency_combo.setMinimumWidth(170)
+        self.concurrency_combo.setToolTip(
+            "How many selected rooms run at once for deployments/system actions. "
+            "Rooms beyond the limit queue and start as earlier ones finish. "
+            "Ignored (forced to 1) if 'same_physical_host' is set in the config, "
+            "or for actions that touch local shared state (e.g. Remove Fingerprint)."
         )
-        row.addWidget(self.sequential_checkbox)
+        row.addWidget(self.concurrency_combo)
         row.addStretch()
         return row
+
+    def _concurrency_settings(self) -> tuple:
+        """Returns (sequential, max_concurrency) for the current combo selection."""
+        _, max_concurrency = CONCURRENCY_OPTIONS[self.concurrency_combo.currentIndex()]
+        return max_concurrency == 1, max_concurrency
 
     def _make_button(
         self, text: str, kind: str, tooltip: str = "", icon=None
@@ -499,7 +706,7 @@ class MatrixDeployWindow(QMainWindow):
         self.cancel_btn.setStyleSheet(
             _button_style(BTN_COLORS["danger"]) + "QPushButton { font-size:14px; padding:10px; }"
         )
-        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setToolTip("Cancel all currently running jobs")
         self.cancel_btn.clicked.connect(self._cancel_deployment)
         row.addWidget(self.cancel_btn, stretch=1)
         return row
@@ -536,8 +743,36 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.reboot_btn.clicked.connect(self._reboot)
 
+        self.matrix_api_certs_btn = self._make_button(
+            "matrix-api-certs",
+            "danger",
+            "Disable cert-init/unseal units, regenerate the self-signed "
+            "matrix-api server cert/key, fix ownership/permissions, and "
+            "restart matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.matrix_api_certs_btn.clicked.connect(self._matrix_api_certs)
+
+        self.fix_room_config_race_btn = self._make_button(
+            "Fix IP Race Condition",
+            "service",
+            "Patch matrix-room-config-generator.service so it waits on "
+            "barco-nms-network-init.service before starting, fixing a race "
+            "where it could grab the wrong/stale IP address. Takes effect on "
+            "next reboot; safe to re-run.",
+            icon=QStyle.SP_BrowserReload,
+        )
+        self.fix_room_config_race_btn.clicked.connect(self._fix_room_config_race)
+
         services_box = self._button_group(
-            "Services", [self.restart_service_btn, self.restart_nms_btn, self.reboot_btn]
+            "Services",
+            [
+                self.restart_service_btn,
+                self.restart_nms_btn,
+                self.reboot_btn,
+                self.matrix_api_certs_btn,
+                self.fix_room_config_race_btn,
+            ],
         )
 
         # --- Bandwidth (config pushes) -----------------------------------
@@ -605,9 +840,50 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.get_nms_password_btn.clicked.connect(self._get_nms_password)
 
+        self.remove_fingerprint_btn = self._make_button(
+            "Remove Fingerprint",
+            "utility",
+            "Remove the cached SSH host key for selected rooms from your local "
+            "known_hosts file (fixes 'REMOTE HOST IDENTIFICATION HAS CHANGED'). "
+            "Local-only; does not connect to the room.",
+            icon=QStyle.SP_TrashIcon,
+        )
+        self.remove_fingerprint_btn.clicked.connect(self._remove_fingerprint)
+
         diagnostics_box = self._button_group(
             "Diagnostics",
-            [self.get_logs_btn, self.view_config_btn, self.get_nms_password_btn],
+            [
+                self.get_logs_btn,
+                self.view_config_btn,
+                self.get_nms_password_btn,
+                self.remove_fingerprint_btn,
+            ],
+        )
+
+        # --- Live Logs (streaming, read-only) -----------------------------
+        self.watch_matrix_api_btn = self._make_button(
+            "Watch matrix-api Live",
+            "neutral",
+            "Stream matrix-api's journal live for selected rooms (one tab per "
+            "room). Read-only - safe to run alongside other jobs on the same "
+            "room. Click Stop on the tab to end.",
+            icon=QStyle.SP_MediaPlay,
+        )
+        self.watch_matrix_api_btn.clicked.connect(self._watch_matrix_api_live)
+
+        self.watch_nms_btn = self._make_button(
+            "Watch NMS Live",
+            "neutral",
+            "Stream barco-nms's journal live for selected rooms (one tab per "
+            "room). Read-only - safe to run alongside other jobs on the same "
+            "room. Click Stop on the tab to end.",
+            icon=QStyle.SP_MediaPlay,
+        )
+        self.watch_nms_btn.clicked.connect(self._watch_nms_live)
+
+        live_logs_box = self._button_group(
+            "Live Logs",
+            [self.watch_matrix_api_btn, self.watch_nms_btn],
         )
 
         # Proportional stretch (by button count) keeps every button ~equal width.
@@ -616,49 +892,65 @@ class MatrixDeployWindow(QMainWindow):
         row.addWidget(services_box, stretch=3)
         row.addWidget(bandwidth_box, stretch=4)
         row.addWidget(diagnostics_box, stretch=3)
+        row.addWidget(live_logs_box, stretch=2)
         return row
 
     def _build_terminal_group(self) -> QGroupBox:
-        group = QGroupBox("Output Terminal")
+        group = QGroupBox("Output")
         layout = QVBoxLayout()
 
-        # Toolbar sits above the console so it never overlaps the output.
-        btn_row = QHBoxLayout()
-        btn_row.addStretch()
+        self.tabs = QTabWidget()
+        self.tabs.setTabsClosable(True)
+        self.tabs.setMovable(True)
+        self.tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+
+        # Pinned "Combined" tab: merged, job-prefixed stream of every job.
+        combined = QWidget()
+        cv = QVBoxLayout(combined)
+        cv.setContentsMargins(6, 6, 6, 6)
+        cv.setSpacing(6)
+        c_toolbar = QHBoxLayout()
+        c_toolbar.addStretch()
         copy_btn = self._make_button("Copy", "utility", icon=QStyle.SP_FileDialogDetailedView)
         copy_btn.clicked.connect(self._copy_terminal)
-        clear = self._make_button("Clear Output", "utility", icon=QStyle.SP_DialogResetButton)
+        clear = self._make_button("Clear", "utility", icon=QStyle.SP_DialogResetButton)
         clear.clicked.connect(self.terminal_clear)
-        btn_row.addWidget(copy_btn)
-        btn_row.addWidget(clear)
-        layout.addLayout(btn_row)
+        c_toolbar.addWidget(copy_btn)
+        c_toolbar.addWidget(clear)
+        cv.addLayout(c_toolbar)
+        self.combined_console = _make_console()
+        cv.addWidget(self.combined_console, stretch=1)
+        self.tabs.addTab(combined, "Combined")
+        # The Combined tab is pinned; remove its close button.
+        self.tabs.tabBar().setTabButton(0, QTabBar.RightSide, None)
 
-        self.terminal = QTextEdit()
-        self.terminal.setReadOnly(True)
-        self.terminal.setMinimumHeight(240)
-        self.terminal.setLineWrapMode(QTextEdit.WidgetWidth)
-        self.terminal.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.terminal.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.terminal.setStyleSheet(
-            "QTextEdit { background-color:#1e1e1e; color:#d4d4d4;"
-            "border:1px solid #37474F; border-radius:6px; padding:6px;"
-            "font-family:'Consolas','Courier New',monospace; }"
-            "QScrollBar:vertical { background:#1e1e1e; width:12px; margin:0; }"
-            "QScrollBar::handle:vertical { background:#555b62; border-radius:6px; min-height:24px; }"
-            "QScrollBar::handle:vertical:hover { background:#6b7280; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
-        )
-        layout.addWidget(self.terminal, stretch=1)
-
+        layout.addWidget(self.tabs)
         group.setLayout(layout)
         return group
 
     def terminal_clear(self) -> None:
-        self.terminal.clear()
+        self.combined_console.clear()
+        self.combined_console._raw_lines = []
 
     def _copy_terminal(self) -> None:
-        QApplication.clipboard().setText(self.terminal.toPlainText())
+        _copy_raw(self.combined_console)
         self.statusBar().showMessage("Output copied to clipboard", 2000)
+
+    def _on_tab_close_requested(self, index: int) -> None:
+        if index == 0:
+            return  # Combined tab is pinned.
+        panel = self.tabs.widget(index)
+        if isinstance(panel, _JobPanel) and not panel.finished:
+            QMessageBox.information(
+                self,
+                "Job Running",
+                "This job is still running. Cancel it before closing the tab.",
+            )
+            return
+        self.tabs.removeTab(index)
+        if panel in self._jobs:
+            self._jobs.remove(panel)
+        panel.deleteLater()
 
     def _update_status_bar(self) -> None:
         selected = sum(1 for cb in self.room_checkboxes.values() if cb.isChecked())
@@ -670,13 +962,85 @@ class MatrixDeployWindow(QMainWindow):
     # -- terminal / status helpers ---------------------------------------
 
     def append_log(self, message: str, level: str = "detail") -> None:
-        color = LEVEL_COLORS.get(level, "#d4d4d4")
-        stamp = time.strftime("%H:%M:%S")
-        self.terminal.append(
-            f'<span style="color:#5c6773;">[{stamp}]</span> '
-            f'<span style="color:{color};">{message}</span>'
-        )
-        self.terminal.moveCursor(QTextCursor.End)
+        """Append to the pinned Combined console (the firehose view)."""
+        _append_console(self.combined_console, message, level)
+
+    # -- job management ---------------------------------------------------
+
+    @staticmethod
+    def _rooms_label(rooms: List[Room]) -> str:
+        if not rooms:
+            return ""
+        nums = [r.number for r in rooms]
+        if len(nums) <= 5:
+            return "OR " + ",".join(str(n) for n in nums)
+        return f"{len(nums)} ORs"
+
+    def _launch_job(
+        self, title: str, worker, rooms: List[Room], lock_rooms: bool = True
+    ) -> _JobPanel:
+        """Create a tab for the job, wire its signals, and register its busy
+        rooms. Does NOT start the worker: the caller must connect the finish
+        signal (all_done / finished_ok / stopped) first and then call
+        ``worker.start()``, to avoid missing a fast-finishing job's completion
+        signal. Pass ``lock_rooms=False`` for read-only jobs (e.g. live log
+        tailing) that should be allowed to run alongside other jobs on the
+        same rooms."""
+        panel = _JobPanel(title, on_cancel=worker.cancel)
+        panel.worker = worker
+        panel.rooms = rooms
+        panel.total_rooms = len(rooms)
+        self._jobs.append(panel)
+        if lock_rooms:
+            self._busy_rooms |= {r.number for r in rooms}
+
+        def _log(message: str, level: str, _panel=panel, _title=title) -> None:
+            _panel.append(message, level)
+            _append_console(self.combined_console, f"[{_title}] {message}", level)
+
+        worker.log.connect(_log)
+
+        # Shared room grid updates (safe: a room belongs to one active job).
+        if hasattr(worker, "room_status"):
+            worker.room_status.connect(self._set_room_status)
+        if hasattr(worker, "room_progress"):
+            worker.room_progress.connect(self._set_room_progress)
+        # Per-job progress: room-count for per-room workers, else byte progress.
+        if hasattr(worker, "room_done"):
+            worker.room_done.connect(
+                lambda _num, ok, _panel=panel: _panel.room_completed(ok)
+            )
+        elif hasattr(worker, "progress"):
+            worker.progress.connect(panel.set_progress)
+
+        label = self._rooms_label(rooms)
+        tab_title = f"{title} \u00b7 {label}" if label else title
+        idx = self.tabs.addTab(panel, tab_title)
+        self.tabs.setCurrentIndex(idx)
+        return panel
+
+    def _finish_job(self, panel: _JobPanel, label: str, ok: Optional[bool] = None) -> None:
+        """Called when a job's worker signals completion: free its rooms,
+        mark the tab, and refresh the status bar."""
+        resolved_ok = (not panel.had_failure) if ok is None else ok
+        panel.mark_finished(resolved_ok)
+        self._busy_rooms -= {r.number for r in panel.rooms}
+        mark = "\u2713" if resolved_ok else "\u2717"
+        idx = self.tabs.indexOf(panel)
+        if idx != -1:
+            self.tabs.setTabText(idx, f"{self.tabs.tabText(idx)} {mark}")
+        self._last_action = f"{label} {mark}"
+        self.append_log(f"=== {label} Complete ===", "info")
+        self._update_status_bar()
+
+    def _cancel_deployment(self) -> None:
+        cancelled = False
+        for panel in self._jobs:
+            if not panel.finished and panel.worker is not None:
+                panel.worker.cancel()
+                cancelled = True
+        if not cancelled:
+            self.statusBar().showMessage("No running jobs to cancel", 2000)
 
     def _set_room_status(self, room_number: int, status: str) -> None:
         text, color = STATUS_BADGES.get(status, ("", "#868e96"))
@@ -747,28 +1111,22 @@ class MatrixDeployWindow(QMainWindow):
             )
             return
 
-        self.append_log("=== Downloading Latest SWU ===", "info")
-
-        self.download_worker = DownloadWorker(
+        worker = DownloadWorker(
             self.config, ArtifactoryCredentials(email, token), CACHE_DIR
         )
-        self.download_worker.log.connect(self.append_log)
-        self.download_worker.progress.connect(self._update_progress)
-        self.download_worker.finished_ok.connect(self._download_finished)
-        # Set busy AFTER the worker exists so Cancel is correctly enabled.
-        self._set_busy(True)
-        self.download_worker.start()
+        panel = self._launch_job("Download SWU", worker, rooms=[])
+        worker.finished_ok.connect(
+            lambda ok, path, _p=panel: self._download_finished(ok, path, _p)
+        )
+        worker.start()
 
-    def _download_finished(self, success: bool, file_path: str) -> None:
-        self._set_busy(False)
+    def _download_finished(self, success: bool, file_path: str, panel: _JobPanel) -> None:
         if success:
             self.swu_file_input.setText(file_path)
-            self.append_log("Download successful - SWU path updated.", "success")
-            self._last_action = "Download Latest \u2713"
+            panel.append("Download successful - SWU path updated.", "success")
         else:
-            self.append_log("Download failed. See messages above.", "error")
-            self._last_action = "Download Latest \u2717"
-        self._update_status_bar()
+            panel.append("Download failed. See messages above.", "error")
+        self._finish_job(panel, "Download SWU", ok=success)
 
     # -- deployment -------------------------------------------------------
 
@@ -778,6 +1136,89 @@ class MatrixDeployWindow(QMainWindow):
             for num, cb in self.room_checkboxes.items()
             if cb.isChecked() and self.config.room(num) is not None
         ]
+
+    def _open_room_gui(self, room: Room) -> None:
+        """Open a single room's NMS demonstrator GUI in the browser and
+        fetch/display its admin password using the existing NMS password
+        (act-mfg-eeprom) logic."""
+        if room.number in self._busy_rooms:
+            QMessageBox.warning(
+                self,
+                "Room Busy",
+                f"OR {room.number} ({room.name}) already has a running job.",
+            )
+            return
+
+        if not self.sudo_password_input.text():
+            QMessageBox.warning(
+                self,
+                "Missing Sudo Password",
+                "Sudo password is required to fetch the NMS admin password.",
+            )
+            return
+
+        creds = DeploymentCredentials(
+            ssh_password=self.password_input.text() or None,
+            sudo_password=self.sudo_password_input.text() or None,
+        )
+
+        btn = self.room_open_gui_buttons.get(room.number)
+        if btn is not None:
+            btn.setEnabled(False)
+            btn.setText("Connecting\u2026")
+
+        worker = OpenRoomGuiWorker(self.config, creds, room)
+        self._open_gui_workers.append(worker)
+        worker.log.connect(self.append_log)
+        worker.finished_ok.connect(
+            lambda num, pwd, w=worker: self._room_gui_ready(num, pwd, w)
+        )
+        worker.start()
+
+    def _room_gui_ready(
+        self, room_number: int, password: Optional[str], worker: OpenRoomGuiWorker
+    ) -> None:
+        if worker in self._open_gui_workers:
+            self._open_gui_workers.remove(worker)
+
+        btn = self.room_open_gui_buttons.get(room_number)
+        if btn is not None:
+            btn.setEnabled(True)
+            btn.setText("Open GUI")
+
+        room = self.config.room(room_number)
+        if room is None:
+            return
+
+        url = room.demonstrator_gui_url(self.config.connection.router_ip)
+        webbrowser.open(url)
+
+        if password:
+            QApplication.clipboard().setText(password)
+            self.append_log(
+                f"OR {room.number} ({room.name}): opened {url} "
+                f"- admin password copied to clipboard.",
+                "success",
+            )
+            QMessageBox.information(
+                self,
+                "NMS Admin Password",
+                f"OR {room.number} ({room.name})\n\n"
+                f"URL: {url}\n\n"
+                f"Admin password (copied to clipboard):\n{password}",
+            )
+        else:
+            self.append_log(
+                f"OR {room.number} ({room.name}): opened {url} "
+                f"- could not retrieve admin password.",
+                "warning",
+            )
+            QMessageBox.warning(
+                self,
+                "Password Not Found",
+                f"Opened {url} but could not retrieve the admin password.\n"
+                "Check the sudo password and connectivity to the room.",
+            )
 
     def _start_deployment(self) -> None:
         rooms = self._selected_rooms()
@@ -807,22 +1248,27 @@ class MatrixDeployWindow(QMainWindow):
                 )
                 return
 
+        busy = [r for r in rooms if r.number in self._busy_rooms]
+        if busy:
+            QMessageBox.warning(
+                self,
+                "Rooms Busy",
+                "These rooms already have a running job:\n"
+                + ", ".join(r.name for r in busy),
+            )
+            return
+
         # Reset badges and progress bars for selected rooms.
         for room in rooms:
             self._set_room_status(room.number, "pending")
-
-        self.terminal.clear()
-        self.append_log("=== Matrix Deployment Started ===", "info")
-        self.append_log(f"Rooms: {', '.join(r.name for r in rooms)}", "info")
-        self.append_log(f"Operation: {op}", "info")
-        self._set_busy(True, deploying=True)
 
         creds = DeploymentCredentials(
             ssh_password=self.password_input.text() or None,
             sudo_password=self.sudo_password_input.text() or None,
         )
+        sequential, max_concurrency = self._concurrency_settings()
 
-        self.deploy_worker = DeploymentWorker(
+        worker = DeploymentWorker(
             config=self.config,
             creds=creds,
             rooms=rooms,
@@ -831,32 +1277,14 @@ class MatrixDeployWindow(QMainWindow):
             swu_file=swu_file,
             template_path=template,
             output_dir=Path.home() / "Downloads",
+            sequential=sequential,
+            max_concurrency=max_concurrency,
         )
-        self.deploy_worker.log.connect(self.append_log)
-        self.deploy_worker.progress.connect(self._update_progress)
-        self.deploy_worker.room_progress.connect(self._set_room_progress)
-        self.deploy_worker.room_status.connect(self._set_room_status)
-        self.deploy_worker.all_done.connect(self._deployment_finished)
-        self.deploy_worker.start()
-
-    def _cancel_deployment(self) -> None:
-        if self.deploy_worker is not None:
-            self.deploy_worker.cancel()
-        if self.download_worker is not None:
-            self.download_worker.cancel()
-        if self.system_action_worker is not None:
-            self.system_action_worker.cancel()
-
-    def _deployment_finished(self) -> None:
-        self.append_log("=== Deployment Complete ===", "info")
-        self._last_action = "Deployment \u2713"
-        self._set_busy(False)
-        self._update_status_bar()
-
-    def _system_action_finished(self) -> None:
-        self.append_log("=== System Action Complete ===", "info")
-        self._set_busy(False)
-        self._update_status_bar()
+        panel = self._launch_job("Deploy", worker, rooms)
+        panel.append(f"Operation: {op}", "info")
+        panel.append(f"Rooms: {', '.join(r.name for r in rooms)}", "info")
+        worker.all_done.connect(lambda _p=panel: self._finish_job(_p, "Deployment"))
+        worker.start()
 
     def _run_system_action(
         self,
@@ -891,21 +1319,26 @@ class MatrixDeployWindow(QMainWindow):
             if reply != QMessageBox.Yes:
                 return
 
+        busy = [r for r in rooms if r.number in self._busy_rooms]
+        if busy:
+            QMessageBox.warning(
+                self,
+                "Rooms Busy",
+                "These rooms already have a running job:\n"
+                + ", ".join(r.name for r in busy),
+            )
+            return
+
         for room in rooms:
             self._set_room_status(room.number, "pending")
-
-        self._last_action = title
-        self.terminal.clear()
-        self.append_log(f"=== {title} Started ===", "info")
-        self.append_log(f"Rooms: {', '.join(r.name for r in rooms)}", "info")
-        self._set_busy(True, deploying=True)
 
         creds = DeploymentCredentials(
             ssh_password=self.password_input.text() or None,
             sudo_password=self.sudo_password_input.text() or None,
         )
+        sequential, max_concurrency = self._concurrency_settings()
 
-        self.system_action_worker = SystemActionWorker(
+        worker = SystemActionWorker(
             config=self.config,
             creds=creds,
             rooms=rooms,
@@ -913,11 +1346,13 @@ class MatrixDeployWindow(QMainWindow):
             bandwidth=bandwidth,
             link_bandwidth_kbps=link_bandwidth_kbps,
             logs_dir=logs_dir,
+            sequential=sequential,
+            max_concurrency=max_concurrency,
         )
-        self.system_action_worker.log.connect(self.append_log)
-        self.system_action_worker.room_status.connect(self._set_room_status)
-        self.system_action_worker.all_done.connect(self._system_action_finished)
-        self.system_action_worker.start()
+        panel = self._launch_job(title, worker, rooms)
+        panel.append(f"Rooms: {', '.join(r.name for r in rooms)}", "info")
+        worker.all_done.connect(lambda _p=panel, t=title: self._finish_job(_p, t))
+        worker.start()
 
     def _restart_service(self) -> None:
         self._run_system_action("restart_service", "Restart Service")
@@ -927,6 +1362,12 @@ class MatrixDeployWindow(QMainWindow):
 
     def _reboot(self) -> None:
         self._run_system_action("reboot", "Reboot")
+
+    def _matrix_api_certs(self) -> None:
+        self._run_system_action("matrix_api_certs", "matrix-api-certs")
+
+    def _fix_room_config_race(self) -> None:
+        self._run_system_action("fix_room_config_race", "Fix IP Race Condition")
 
     def _set_nms_bandwidth(self, bandwidth: str) -> None:
         self._run_system_action(
@@ -966,35 +1407,50 @@ class MatrixDeployWindow(QMainWindow):
             confirm=False,
         )
 
-    # -- shared state -----------------------------------------------------
-
-    def _update_progress(self, current: int, total: int) -> None:
-        if total > 0:
-            self.progress_bar.setValue(int(current / total * 100))
-
-    def _set_busy(self, busy: bool, deploying: bool = False) -> None:
-        self.progress_bar.setVisible(busy)
-        if busy:
-            self.progress_bar.setValue(0)
-        self.deploy_btn.setEnabled(not busy)
-        self.download_btn.setEnabled(not busy)
-        self.restart_service_btn.setEnabled(not busy)
-        self.restart_nms_btn.setEnabled(not busy)
-        self.reboot_btn.setEnabled(not busy)
-        self.bandwidth_max_btn.setEnabled(not busy)
-        self.bandwidth_limited_btn.setEnabled(not busy)
-        self.link_bw_low_btn.setEnabled(not busy)
-        self.link_bw_high_btn.setEnabled(not busy)
-        self.get_logs_btn.setEnabled(not busy)
-        self.view_config_btn.setEnabled(not busy)
-        self.cancel_btn.setEnabled(
-            busy
-            and (
-                deploying
-                or self.download_worker is not None
-                or self.system_action_worker is not None
-            )
+    def _remove_fingerprint(self) -> None:
+        self._run_system_action(
+            "remove_fingerprint",
+            "Remove Fingerprint",
+            require_sudo=False,
+            confirm=False,
         )
+
+    # -- live log tailing ---------------------------------------------------
+
+    def _watch_service_live(self, service: str, title: str) -> None:
+        """Launch one live ``journalctl -f`` tail tab per selected room.
+
+        Read-only, so it deliberately does NOT lock the room (lock_rooms=False):
+        watching logs while a deploy/system action runs on the same room is a
+        normal, safe use case.
+        """
+        rooms = self._selected_rooms()
+        if not rooms:
+            QMessageBox.warning(self, "No Rooms", "Select at least one operating room.")
+            return
+
+        creds = DeploymentCredentials(
+            ssh_password=self.password_input.text() or None,
+            sudo_password=self.sudo_password_input.text() or None,
+        )
+
+        for room in rooms:
+            worker = LogTailWorker(self.config, creds, room, service)
+            panel = self._launch_job(title, worker, [room], lock_rooms=False)
+            panel.status_label.setText("Watching\u2026")
+            panel.status_label.setStyleSheet("font-weight:700; color:#22b8cf;")
+            panel.progress.setRange(0, 0)  # indeterminate "live" indicator
+            panel.cancel_btn.setText("Stop")
+            worker.stopped.connect(
+                lambda _p=panel, t=title: self._finish_job(_p, t, ok=True)
+            )
+            worker.start()
+
+    def _watch_matrix_api_live(self) -> None:
+        self._watch_service_live(self.config.connection.service_name, "Watch matrix-api")
+
+    def _watch_nms_live(self) -> None:
+        self._watch_service_live(self.config.connection.nms_service_name, "Watch NMS")
 
     # -- settings persistence --------------------------------------------
 
@@ -1041,6 +1497,21 @@ class MatrixDeployWindow(QMainWindow):
             pass
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
+        running = [p for p in self._jobs if not p.finished]
+        if running:
+            reply = QMessageBox.question(
+                self,
+                "Jobs Running",
+                f"{len(running)} job(s) are still running. Quit anyway?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                event.ignore()
+                return
+            for panel in running:
+                if panel.worker is not None:
+                    panel.worker.cancel()
         self._save_settings()
         event.accept()
 

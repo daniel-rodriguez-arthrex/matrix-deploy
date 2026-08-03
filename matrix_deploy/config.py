@@ -27,6 +27,15 @@ class Room:
     def nms_url(self) -> str:
         return f"https://{self.room_id}:8443"
 
+    def demonstrator_gui_url(self, router_ip: str, port_base: int = 11000) -> str:
+        """NMS demonstrator GUI URL, reachable through the router on a
+        per-room port (e.g. base 11000 -> 11001-11012 for rooms 1-12)."""
+        return f"https://{router_ip}:{port_base + self.number}/nms-demonstrator-gui/"
+
+    def trusted_endpoint(self) -> str:
+        """Room subnet IP with host id .13, used for apiServer.trustedEndPoints."""
+        return f"{self.room_id.rsplit('.', 1)[0]}.13"
+
 
 @dataclass(frozen=True)
 class ConnectionConfig:

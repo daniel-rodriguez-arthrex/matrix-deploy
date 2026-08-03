@@ -57,6 +57,14 @@ def build_room_config(
     nms["url"] = room.nms_url()
     room_section["roomId"] = room.room_id
 
+    api_server["trustedEndPoints"] = [
+        room.trusted_endpoint(),
+        "10.101.44.150",
+        "127.0.0.1",
+        "10.101.44.236",
+        "localhost",
+    ]
+
     # Never auto-populate interOperatingRooms - leave it as-is from template
     # or preserve manual edits in existing files.
 
