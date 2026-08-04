@@ -231,6 +231,18 @@ QGroupBox::title {
     padding: 0 6px;
     color: #37474F;
 }
+QGroupBox::indicator {
+    width: 12px;
+    height: 8px;
+    image: url(__CHEVRON__);
+}
+QGroupBox::indicator:unchecked {
+    image: none;
+    border-left: 5px solid #37474F;
+    border-top: 4px solid transparent;
+    border-bottom: 4px solid transparent;
+    width: 0; height: 0;
+}
 QCheckBox { spacing: 6px; }
 QScrollArea { border: 1px solid #CFD8DC; border-radius: 6px; background: #FFFFFF; }
 QProgressBar {
@@ -713,21 +725,32 @@ class MatrixDeployWindow(QMainWindow):
 
     @staticmethod
     def _button_group(title: str, buttons: List[QPushButton]) -> QGroupBox:
-        """Wrap a set of related buttons in a titled frame (inherits global
-        QGroupBox styling). Buttons stretch equally to fill the frame."""
+        """Wrap a set of related buttons in a titled, collapsible frame
+        (inherits global QGroupBox styling). Buttons stretch equally to fill
+        the frame. Click the checkbox in the title to collapse/expand the
+        group - handy once several groups are on screen at once."""
         box = QGroupBox(title)
+        box.setCheckable(True)
+        box.setChecked(True)
+        box.setToolTip("Click to collapse/expand this group")
         inner = QHBoxLayout()
         inner.setContentsMargins(8, 6, 8, 8)
         inner.setSpacing(6)
         for btn in buttons:
             inner.addWidget(btn, stretch=1)
         box.setLayout(inner)
+
+        def _toggle(checked: bool, _buttons=buttons) -> None:
+            for b in _buttons:
+                b.setVisible(checked)
+
+        box.toggled.connect(_toggle)
         return box
 
     def _build_controls_row(self) -> QHBoxLayout:
         # --- Services (restarts / reboot) --------------------------------
         self.restart_service_btn = self._make_button(
-            "Restart Service", "service", "Restart the matrix-api service on selected rooms",
+            "Restart matrix-api", "service", "Restart the matrix-api service on selected rooms",
             icon=QStyle.SP_BrowserReload,
         )
         self.restart_service_btn.clicked.connect(self._restart_service)
@@ -737,6 +760,18 @@ class MatrixDeployWindow(QMainWindow):
             icon=QStyle.SP_BrowserReload,
         )
         self.restart_nms_btn.clicked.connect(self._restart_nms_service)
+
+        self.stop_service_btn = self._make_button(
+            "Stop matrix-api", "danger", "Stop the matrix-api service on selected rooms",
+            icon=QStyle.SP_MediaStop,
+        )
+        self.stop_service_btn.clicked.connect(self._stop_service)
+
+        self.stop_nms_btn = self._make_button(
+            "Stop NMS", "danger", "Stop the barco-nms service on selected rooms",
+            icon=QStyle.SP_MediaStop,
+        )
+        self.stop_nms_btn.clicked.connect(self._stop_nms_service)
 
         self.reboot_btn = self._make_button(
             "Reboot", "danger", "Reboot selected rooms", icon=QStyle.SP_ComputerIcon
@@ -769,6 +804,8 @@ class MatrixDeployWindow(QMainWindow):
             [
                 self.restart_service_btn,
                 self.restart_nms_btn,
+                self.stop_service_btn,
+                self.stop_nms_btn,
                 self.reboot_btn,
                 self.matrix_api_certs_btn,
                 self.fix_room_config_race_btn,
@@ -804,6 +841,14 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.link_bw_high_btn.clicked.connect(lambda: self._set_nms_link_bandwidth(500000))
 
+        self.remove_overlay_btn = self._make_button(
+            "Remove Overlay",
+            "utility",
+            "Push application-user.yml with nexxis.overlay.noVideoOverlayId = myEmptyOverlay "
+            "and restart barco-nms",
+        )
+        self.remove_overlay_btn.clicked.connect(self._remove_overlay)
+
         bandwidth_box = self._button_group(
             "Bandwidth",
             [
@@ -811,6 +856,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.link_bw_high_btn,
                 self.bandwidth_limited_btn,
                 self.link_bw_low_btn,
+                self.remove_overlay_btn,
             ],
         )
 
@@ -1355,10 +1401,16 @@ class MatrixDeployWindow(QMainWindow):
         worker.start()
 
     def _restart_service(self) -> None:
-        self._run_system_action("restart_service", "Restart Service")
+        self._run_system_action("restart_service", "Restart matrix-api")
 
     def _restart_nms_service(self) -> None:
         self._run_system_action("restart_nms_service", "Restart NMS")
+
+    def _stop_service(self) -> None:
+        self._run_system_action("stop_service", "Stop matrix-api")
+
+    def _stop_nms_service(self) -> None:
+        self._run_system_action("stop_nms_service", "Stop NMS")
 
     def _reboot(self) -> None:
         self._run_system_action("reboot", "Reboot")
@@ -1380,6 +1432,9 @@ class MatrixDeployWindow(QMainWindow):
             f"Set NMS Interop Bandwidth: {kbps}",
             link_bandwidth_kbps=kbps,
         )
+
+    def _remove_overlay(self) -> None:
+        self._run_system_action("remove_overlay", "Remove Overlay")
 
     def _get_logs(self) -> None:
         self._run_system_action(

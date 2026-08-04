@@ -416,6 +416,50 @@ class Deployer:
         """Connect to a room and restart the barco-nms service."""
         return self._restart_service_on_room(room, self.config.connection.nms_service_name)
 
+    def _stop_service(
+        self, client: paramiko.SSHClient, room: Room, service_name: str
+    ) -> bool:
+        """Stop the given service."""
+        sudo = self._sudo_prefix()
+        cmd = (
+            f"{sudo} systemctl stop {shlex.quote(service_name)} "
+            f"&& {sudo} systemctl --no-pager --full status {shlex.quote(service_name)} -n 10"
+        )
+        exit_status = run_command(
+            client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+        )
+        # `systemctl status` exits 3 for an inactive (stopped) unit, which is
+        # the expected outcome here, so accept it alongside a clean 0.
+        return exit_status in (0, 3)
+
+    def _stop_service_on_room(self, room: Room, service_name: str) -> bool:
+        """Connect to a room and stop the given service."""
+        self.log(f"=== OR {room.number}: Stopping {service_name} ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            ok = self._stop_service(client, room, service_name)
+            if ok:
+                self.log("Service stopped.", "success")
+            return ok
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def stop_service(self, room: Room) -> bool:
+        """Connect to a room and stop the matrix-api service."""
+        return self._stop_service_on_room(room, self.config.connection.service_name)
+
+    def stop_nms_service(self, room: Room) -> bool:
+        """Connect to a room and stop the barco-nms service."""
+        return self._stop_service_on_room(room, self.config.connection.nms_service_name)
+
     def _read_sudo_prefix(self) -> str:
         """Sudo prefix for read-only commands: only elevate if a password is
         available, otherwise run unprivileged (avoids a hanging password prompt)."""
@@ -693,6 +737,12 @@ class Deployer:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def deploy_nms_remove_overlay(self, room: Room, bandwidth_kbps: int = 500000) -> bool:
+        """Push application-user.yml (which sets nexxis.overlay.noVideoOverlayId =
+        myEmptyOverlay) and restart barco-nms so the video overlay is removed."""
+        self.log(f"=== OR {room.number}: Removing video overlay ===", "info")
+        return self.deploy_nms_link_bandwidth(room, bandwidth_kbps)
 
     def deploy_matrix_api_certs(self, room: Room) -> bool:
         """Disable the cert-init/unseal units, generate a fresh self-signed

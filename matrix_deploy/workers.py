@@ -88,12 +88,18 @@ class SystemActionWorker(QThread):
                 ok = deployer.restart_service(room)
             elif self.action == "restart_nms_service":
                 ok = deployer.restart_nms_service(room)
+            elif self.action == "stop_service":
+                ok = deployer.stop_service(room)
+            elif self.action == "stop_nms_service":
+                ok = deployer.stop_nms_service(room)
             elif self.action == "reboot":
                 ok = deployer.reboot(room)
             elif self.action == "nms_bandwidth":
                 ok = deployer.deploy_golden_nms_config(room, self.bandwidth)
             elif self.action == "nms_link_bandwidth":
                 ok = deployer.deploy_nms_link_bandwidth(room, self.link_bandwidth_kbps)
+            elif self.action == "remove_overlay":
+                ok = deployer.deploy_nms_remove_overlay(room)
             elif self.action == "get_logs":
                 ok = deployer.fetch_service_logs(room, self.logs_dir) is not None
             elif self.action == "view_config":
