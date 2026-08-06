@@ -14,6 +14,7 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .artifactory import ArtifactoryClient, ArtifactoryCredentials, ArtifactoryError
 from .config import AppConfig, Room
 from .deployer import DeploymentCredentials, DeploymentRequest, Deployer
+from .jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
 from .ssh_client import SSHError, SSHTarget, connect
 
 # Actions that mutate a single shared *local* resource (e.g. ~/.ssh/known_hosts)
@@ -112,6 +113,8 @@ class SystemActionWorker(QThread):
                 ok = deployer.deploy_matrix_api_certs(room)
             elif self.action == "fix_room_config_race":
                 ok = deployer.fix_room_config_race(room)
+            elif self.action == "set_log_debug":
+                ok = deployer.set_log_level(room, "debug")
             else:
                 self.log.emit(f"Unknown action: {self.action}", "error")
         except Exception as exc:  # noqa: BLE001 - never let a thread die silently
@@ -220,6 +223,40 @@ class DownloadWorker(QThread):
         except Exception as exc:  # noqa: BLE001 - surface unexpected errors
             self.log.emit(f"Unexpected download error: {exc}", "error")
             self.finished_ok.emit(False, "")
+
+
+class BuildTriggerWorker(QThread):
+    """Triggers a new "Embedded Builder" Jenkins build off the UI thread."""
+
+    log = pyqtSignal(str, str)                # message, level
+    finished_ok = pyqtSignal(bool, str, str)   # success, message, build_url ("" if unknown)
+
+    def __init__(self, creds: JenkinsCredentials, job_name: str = JENKINS_JOB):
+        super().__init__()
+        self.creds = creds
+        self.job_name = job_name
+
+    def cancel(self) -> None:
+        # The crumb fetch + build POST are a single quick round-trip with no
+        # cancellable midpoint; this exists only so _launch_job's generic
+        # on_cancel wiring has something to call.
+        pass
+
+    def run(self) -> None:
+        client = JenkinsClient(self.creds, job_name=self.job_name)
+        try:
+            result = client.trigger_build(log=lambda m, lvl: self.log.emit(m, lvl))
+            if result.build_number is not None:
+                message = f"'{self.job_name}' #{result.build_number} triggered."
+            else:
+                message = f"'{self.job_name}' triggered (build number not yet known)."
+            self.finished_ok.emit(True, message, result.build_url or "")
+        except JenkinsError as exc:
+            self.log.emit(str(exc), "error")
+            self.finished_ok.emit(False, str(exc), "")
+        except Exception as exc:  # noqa: BLE001 - surface unexpected errors
+            self.log.emit(f"Unexpected error triggering build: {exc}", "error")
+            self.finished_ok.emit(False, str(exc), "")
 
 
 class LogTailWorker(QThread):

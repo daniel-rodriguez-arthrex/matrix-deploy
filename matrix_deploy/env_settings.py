@@ -19,6 +19,7 @@ NON_SECRET_KEY_MAP = {
     "ROUTER_IP": "router_ip",
     "SSH_USERNAME": "username",
     "ARTIFACTORY_EMAIL": "artifactory_email",
+    "JENKINS_USERNAME": "jenkins_username",
     "SWU_FILE": "swu_file",
     "CONFIG_TEMPLATE": "config_file",
 }
@@ -31,6 +32,7 @@ SECRET_KEY_MAP = {
     # ARTIFACTORY_API_KEY is an accepted alias for ARTIFACTORY_TOKEN.
     "ARTIFACTORY_TOKEN": "artifactory_token",
     "ARTIFACTORY_API_KEY": "artifactory_token",
+    "JENKINS_TOKEN": "jenkins_token",
 }
 
 ENV_KEY_MAP = {**NON_SECRET_KEY_MAP, **SECRET_KEY_MAP}

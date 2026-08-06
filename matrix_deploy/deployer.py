@@ -7,6 +7,7 @@ cooperative cancellation via an ``is_cancelled`` callable.
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import subprocess
@@ -272,7 +273,7 @@ class Deployer:
 
         self.log(f"Uploading {swu_file.name}...", "detail")
         try:
-            upload_file(client, str(swu_file), remote_path, self.progress)
+            upload_file(client, str(swu_file), remote_path, self.progress, self.log)
         except Exception as exc:  # noqa: BLE001
             self.log(f"Upload failed: {exc}", "error")
             return False
@@ -300,12 +301,14 @@ class Deployer:
             else:
                 self.log(line, "detail")
 
+        install_start = time.monotonic()
         run_command(
             client,
             f"swupdate-client -v {shlex.quote(remote_path)}",
             get_pty=True,
             on_line=on_line,
         )
+        install_elapsed = time.monotonic() - install_start
 
         # Clean up uploaded file (best effort; ignore errors).
         run_command(client, f"rm -f {shlex.quote(remote_path)}")
@@ -314,11 +317,17 @@ class Deployer:
             self.log("SWU update failed - no success message received.", "error")
             return False
 
+        self.log(f"Install (swupdate-client) took {install_elapsed:.1f}s.", "detail")
         self.log("SWU update successful - system will reboot.", "success")
         self._advance()  # SWU installed
+        reboot_start = time.monotonic()
         if not wait_for_reboot(self._target(room), self.log, self.is_cancelled):
             self.log("System did not come back online within timeout.", "error")
             return False
+        self.log(
+            f"Reboot/online wait took {time.monotonic() - reboot_start:.1f}s.",
+            "detail",
+        )
         self.log("System is back online.", "success")
         self._advance()  # system back online
         return True
@@ -576,6 +585,99 @@ class Deployer:
                 dest.write_text("\n".join(collected) + "\n", encoding="utf-8")
                 self.log(f"Saved raw config copy to {dest}", "success")
 
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def set_log_level(self, room: Room, level: str = "debug") -> bool:
+        """Read the room's matrix.api.config.json, set every
+        ``logConfig.streams[].level`` to ``level``, push it back, and restart
+        matrix-api so the new logging level takes effect.
+
+        Only the log level is touched; every other field in the existing
+        config is preserved exactly as-is.
+        """
+        conn = self.config.connection
+        self.log(
+            f"=== OR {room.number}: Setting log level to '{level}' ===", "info"
+        )
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+
+        try:
+            self._begin(3)
+
+            # 1. Read the current config off the room.
+            self.log("Reading current matrix.api.config.json...", "detail")
+            prefix = self._read_sudo_prefix()
+            cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
+            collected: List[str] = []
+            exit_status = run_command(
+                client, cmd, get_pty=True, on_line=collected.append
+            )
+            if exit_status != 0:
+                self.log("Failed to read config file.", "error")
+                return False
+
+            raw = "\n".join(collected)
+            if not raw.strip():
+                self.log(
+                    "Config file read returned no output (permission denied, "
+                    "empty file, or a dropped SSH session are the usual causes).",
+                    "error",
+                )
+                return False
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                self.log(f"Could not parse remote config as JSON: {exc}", "error")
+                preview = raw if len(raw) <= 500 else raw[:500] + "... (truncated)"
+                self.log(f"Raw output was: {preview!r}", "detail")
+                return False
+            self._advance()  # read
+
+            # 2. Update logConfig.streams[].level in place.
+            streams = data.get("logConfig", {}).get("streams")
+            if not isinstance(streams, list) or not streams:
+                self.log(
+                    "Config has no logConfig.streams to update.", "error"
+                )
+                return False
+            for stream in streams:
+                if isinstance(stream, dict):
+                    stream["level"] = level
+
+            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-loglevel.json"
+            local_tmp.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+
+            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
+            self.log("Uploading updated config...", "detail")
+            try:
+                upload_file(client, str(local_tmp), remote_staging)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Config upload failed: {exc}", "error")
+                return False
+            self._advance()  # uploaded
+
+            # 3. Apply and restart matrix-api.
+            self.log("Applying config and restarting matrix-api...", "detail")
+            if not self._apply_config_and_restart_service(client, room):
+                self.log("Config apply failed (service restart failed).", "error")
+                return False
+
+            self.log(
+                f"OR {room.number}: log level set to '{level}' and matrix-api restarted.",
+                "success",
+            )
+            self._advance()  # applied
             return True
         finally:
             try:

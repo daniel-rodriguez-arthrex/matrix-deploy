@@ -25,6 +25,8 @@ matrix_deploy/template/*.json
 *.part
 build/
 dist/
+# PyInstaller regenerates this on every build_exe.ps1 run; not needed in git
+*.spec
 
 # OS
 .DS_Store

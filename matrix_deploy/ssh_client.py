@@ -5,6 +5,7 @@ All deployment logic uses this module so connection handling lives in one place.
 
 from __future__ import annotations
 
+import os
 import socket
 import time
 from dataclasses import dataclass
@@ -105,6 +106,7 @@ def upload_file(
     local_path: str,
     remote_path: str,
     progress: Optional[Progress] = None,
+    log: Optional[Logger] = None,
 ) -> None:
     """Upload a file via SCP with an optional, rate-limited progress callback.
 
@@ -114,6 +116,10 @@ def upload_file(
     floods the receiver - especially with several rooms uploading in
     parallel - and can make the UI appear to hang even though the transfer
     itself is progressing fine. Throttle to a sane update rate instead.
+
+    When ``log`` is provided, the total elapsed time and average throughput
+    are reported once the transfer finishes, so we can tell whether a slow
+    deploy is the SCP transfer itself (vs. the later swupdate install step).
     """
     last_emit = 0.0
 
@@ -126,8 +132,24 @@ def upload_file(
             last_emit = now
             progress(sent, size)
 
+    try:
+        size_bytes = os.path.getsize(local_path)
+    except OSError:
+        size_bytes = 0
+
+    start = time.monotonic()
     with SCPClient(client.get_transport(), progress=_cb if progress else None) as scp:
         scp.put(local_path, remote_path)
+    elapsed = time.monotonic() - start
+
+    if log is not None:
+        size_mb = size_bytes / (1024 * 1024)
+        rate = (size_mb / elapsed) if elapsed > 0 else 0.0
+        log(
+            f"Transferred {size_mb:.1f} MB in {elapsed:.1f}s "
+            f"({rate:.2f} MB/s).",
+            "detail",
+        )
 
 
 def port_is_open(host: str, port: int, timeout: float = 2.0) -> bool:

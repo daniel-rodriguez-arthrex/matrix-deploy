@@ -46,7 +46,9 @@ from .artifactory import ArtifactoryCredentials
 from .config import AppConfig, Room
 from .deployer import DeploymentCredentials
 from .env_settings import load_env_secrets, load_env_settings
+from .jenkins import JenkinsCredentials
 from .workers import (
+    BuildTriggerWorker,
     DeploymentWorker,
     DownloadWorker,
     LogTailWorker,
@@ -138,23 +140,37 @@ def _button_style(bg: str) -> str:
     )
 
 
-def _make_chevron_icon(color: str) -> str:
-    """Render a small down-chevron to a cached PNG and return its file path.
+def _make_chevron_icon(color: str, width: int = 12, height: int = 8) -> str:
+    """Render a down-chevron of the given size to a cached PNG and return its
+    file path.
 
     QSS's CSS-border triangle trick doesn't render reliably under the Fusion
-    style on all Qt builds, so we draw a real icon once (per color) and
-    reference it via ``image: url(...)`` instead.
+    style on all Qt builds, so we draw a real icon once (per color/size) and
+    reference it via ``image: url(...)`` instead. ``width``/``height`` also
+    drive the QSS ``::indicator``/``::down-arrow`` box size, which is what
+    Qt uses for hit-testing - i.e. making these bigger also enlarges the
+    clickable area, not just the drawn icon.
     """
-    safe_name = color.lstrip("#")
+    safe_name = f"{color.lstrip('#')}_{width}x{height}"
     path = Path(tempfile.gettempdir()) / f"matrix_deploy_chevron_{safe_name}.png"
     if not path.exists():
-        pixmap = QPixmap(12, 8)
+        margin_x = max(1, round(width * 1 / 12))
+        margin_y = max(1, round(height * 1 / 8))
+        pixmap = QPixmap(width, height)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(color))
-        painter.drawPolygon(QPolygon([QPoint(1, 1), QPoint(11, 1), QPoint(6, 7)]))
+        painter.drawPolygon(
+            QPolygon(
+                [
+                    QPoint(margin_x, margin_y),
+                    QPoint(width - margin_x, margin_y),
+                    QPoint(width // 2, height - margin_y),
+                ]
+            )
+        )
         painter.end()
         pixmap.save(str(path), "PNG")
     return str(path).replace("\\", "/")
@@ -166,6 +182,11 @@ def build_app_stylesheet() -> str:
     exists) so the combo-box chevron icon can be rendered with QPainter."""
     chevron = _make_chevron_icon("#455A64")
     chevron_open = _make_chevron_icon("#1976D2")
+    # Bigger than the combo-box chevron on purpose: this is the collapse/
+    # expand indicator on checkable QGroupBox titles, and its QSS box size
+    # doubles as the clickable hit area, which was previously too small
+    # to reliably click.
+    group_chevron = _make_chevron_icon("#37474F", width=22, height=16)
     css = """
 QWidget {
     background-color: #ECEFF1;
@@ -232,15 +253,15 @@ QGroupBox::title {
     color: #37474F;
 }
 QGroupBox::indicator {
-    width: 12px;
-    height: 8px;
-    image: url(__CHEVRON__);
+    width: 22px;
+    height: 16px;
+    image: url(__GROUP_CHEVRON__);
 }
 QGroupBox::indicator:unchecked {
     image: none;
-    border-left: 5px solid #37474F;
-    border-top: 4px solid transparent;
-    border-bottom: 4px solid transparent;
+    border-left: 9px solid #37474F;
+    border-top: 7px solid transparent;
+    border-bottom: 7px solid transparent;
     width: 0; height: 0;
 }
 QCheckBox { spacing: 6px; }
@@ -258,7 +279,11 @@ QToolTip {
     background: #37474F; color: white; border: none; padding: 4px 6px;
 }
 """
-    return css.replace("__CHEVRON__", chevron).replace("__CHEVRON_OPEN__", chevron_open)
+    return (
+        css.replace("__CHEVRON__", chevron)
+        .replace("__CHEVRON_OPEN__", chevron_open)
+        .replace("__GROUP_CHEVRON__", group_chevron)
+    )
 
 
 SECTION_LABEL_STYLE = (
@@ -541,6 +566,20 @@ class MatrixDeployWindow(QMainWindow):
         layout.addWidget(self.artifactory_token_input, 5, 1)
         layout.addWidget(self._password_toggle(self.artifactory_token_input), 5, 2)
 
+        layout.addWidget(QLabel("Jenkins Username:"), 6, 0)
+        self.jenkins_username_input = QLineEdit()
+        self.jenkins_username_input.setPlaceholderText(
+            "Jenkins login ID, e.g. 'Daniel Rodriguez' (not your email)"
+        )
+        layout.addWidget(self.jenkins_username_input, 6, 1)
+
+        layout.addWidget(QLabel("Jenkins Token:"), 7, 0)
+        self.jenkins_token_input = QLineEdit()
+        self.jenkins_token_input.setEchoMode(QLineEdit.Password)
+        self.jenkins_token_input.setPlaceholderText("API token (not saved to disk)")
+        layout.addWidget(self.jenkins_token_input, 7, 1)
+        layout.addWidget(self._password_toggle(self.jenkins_token_input), 7, 2)
+
         group.setLayout(layout)
         return group
 
@@ -563,6 +602,14 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.download_btn.clicked.connect(self._download_latest)
         layout.addWidget(self.download_btn, 0, 3)
+        self.build_btn = self._make_button(
+            "Build New",
+            "service",
+            tooltip="Trigger a new 'Embedded Builder' Jenkins build (matrix / wrynose).",
+            icon=QStyle.SP_BrowserReload,
+        )
+        self.build_btn.clicked.connect(self._trigger_build)
+        layout.addWidget(self.build_btn, 0, 4)
 
         layout.addWidget(QLabel("Config Template:"), 1, 0)
         self.config_file_input = QLineEdit()
@@ -799,6 +846,15 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.fix_room_config_race_btn.clicked.connect(self._fix_room_config_race)
 
+        self.log_debug_btn = self._make_button(
+            "Log Level: Debug",
+            "service",
+            "Set logConfig.streams[].level to 'debug' in matrix.api.config.json "
+            "and restart matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.log_debug_btn.clicked.connect(self._set_log_debug)
+
         services_box = self._button_group(
             "Services",
             [
@@ -809,6 +865,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.reboot_btn,
                 self.matrix_api_certs_btn,
                 self.fix_room_config_race_btn,
+                self.log_debug_btn,
             ],
         )
 
@@ -1174,6 +1231,53 @@ class MatrixDeployWindow(QMainWindow):
             panel.append("Download failed. See messages above.", "error")
         self._finish_job(panel, "Download SWU", ok=success)
 
+    # -- build --------------------------------------------------------
+
+    def _trigger_build(self) -> None:
+        username = self.jenkins_username_input.text().strip()
+        token = self.jenkins_token_input.text().strip()
+        if not username or not token:
+            QMessageBox.warning(
+                self, "Missing Credentials",
+                "Enter your Jenkins username and token in Connection Settings.\n\n"
+                "Note: this is your Jenkins login ID (e.g. 'Daniel Rodriguez'), "
+                "not your email - check https://jenkins-embedded.dev.actsw.net "
+                "under your account/profile page if unsure.",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Build New",
+            "Trigger a new 'Embedded Builder' Jenkins build (matrix / wrynose)?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        worker = BuildTriggerWorker(JenkinsCredentials(username, token))
+        panel = self._launch_job("Build New", worker, rooms=[])
+        worker.finished_ok.connect(
+            lambda ok, msg, url, _p=panel: self._trigger_build_finished(ok, msg, url, _p)
+        )
+        worker.start()
+
+    def _trigger_build_finished(
+        self, success: bool, message: str, build_url: str, panel: _JobPanel
+    ) -> None:
+        if success:
+            panel.append(message, "success")
+            if build_url:
+                panel.append(f"View build: {build_url}", "info")
+                idx = self.tabs.indexOf(panel)
+                match = re.search(r"#(\d+)", message)
+                if idx != -1 and match:
+                    self.tabs.setTabText(idx, f"Build New #{match.group(1)}")
+        else:
+            panel.append("Build trigger failed. See messages above.", "error")
+        self._finish_job(panel, "Build New", ok=success)
+
     # -- deployment -------------------------------------------------------
 
     def _selected_rooms(self) -> List[Room]:
@@ -1421,6 +1525,9 @@ class MatrixDeployWindow(QMainWindow):
     def _fix_room_config_race(self) -> None:
         self._run_system_action("fix_room_config_race", "Fix IP Race Condition")
 
+    def _set_log_debug(self) -> None:
+        self._run_system_action("set_log_debug", "Log Level: Debug")
+
     def _set_nms_bandwidth(self, bandwidth: str) -> None:
         self._run_system_action(
             "nms_bandwidth", f"Set Bandwidth: {bandwidth}", bandwidth=bandwidth
@@ -1526,6 +1633,7 @@ class MatrixDeployWindow(QMainWindow):
         self.swu_file_input.setText(data.get("swu_file", ""))
         self.config_file_input.setText(data.get("config_file", ""))
         self.artifactory_email_input.setText(data.get("artifactory_email", ""))
+        self.jenkins_username_input.setText(data.get("jenkins_username", ""))
 
         # Secrets are prefilled from .env only (never from the settings file)
         # and are still never persisted back to disk by this app.
@@ -1536,6 +1644,8 @@ class MatrixDeployWindow(QMainWindow):
             self.sudo_password_input.setText(secrets["sudo_password"])
         if "artifactory_token" in secrets:
             self.artifactory_token_input.setText(secrets["artifactory_token"])
+        if "jenkins_token" in secrets:
+            self.jenkins_token_input.setText(secrets["jenkins_token"])
 
     def _save_settings(self) -> None:
         data = {
@@ -1544,6 +1654,7 @@ class MatrixDeployWindow(QMainWindow):
             "swu_file": self.swu_file_input.text(),
             "config_file": self.config_file_input.text(),
             "artifactory_email": self.artifactory_email_input.text(),
+            "jenkins_username": self.jenkins_username_input.text(),
             # Passwords and tokens are intentionally NOT persisted.
         }
         try:
