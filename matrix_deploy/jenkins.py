@@ -16,24 +16,30 @@ JENKINS_JOB = "Embedded Builder"
 
 # Fixed build parameters, matching the manual "matrix / wrynose" release
 # build triggered from the Jenkins UI.
+#
+# NOTE: boolean parameters MUST use the literal strings "true"/"false" here,
+# not the HTML-checkbox value "on" that a browser form submits. Jenkins'
+# buildWithParameters endpoint parses booleans with Boolean.valueOf(...),
+# which treats anything other than "true" (case-insensitive) - including
+# "on" - as false. Sending "on" silently built with PUBLISH_AF2=false.
 BUILD_PARAMETERS = {
     "MACHINE": "matrix",
-    "BUILD_EXTRAS": "",
-    "BUILD_SDK": "",
-    "BUILD_PUBLIC_SDK": "",
-    "SCA_FORCE_RUN": "",
-    "PULL_LATEST_UPSTREAM": "",
-    "PUBLISH_AF2": "on",
-    "PUBLISH_OPKG": "",
+    "BUILD_EXTRAS": "false",
+    "BUILD_SDK": "false",
+    "BUILD_PUBLIC_SDK": "false",
+    "SCA_FORCE_RUN": "false",
+    "PULL_LATEST_UPSTREAM": "false",
+    "PUBLISH_AF2": "true",
+    "PUBLISH_OPKG": "false",
     "META_ACT_BRANCH": "refs/heads/wrynose",
     "COMMENT": "",
     "BB_BRANCH": "DEV",
-    "TROUBLESHOOT_BUILD": "",
-    "ENABLE_UNIT_TESTS": "",
+    "TROUBLESHOOT_BUILD": "false",
+    "ENABLE_UNIT_TESTS": "false",
     "HUMAN_USE": "no",
-    "SSTATE_RECIPE_BUILD": "",
+    "SSTATE_RECIPE_BUILD": "false",
     "SSTATE_RECIPES_TO_BUILD": "",
-    "PUBLISH_QEMU_ARTIFACTS": "",
+    "PUBLISH_QEMU_ARTIFACTS": "false",
 }
 
 
