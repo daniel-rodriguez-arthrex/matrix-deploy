@@ -901,7 +901,7 @@ class MatrixDeployWindow(QMainWindow):
         self.remove_overlay_btn = self._make_button(
             "Remove Overlay",
             "utility",
-            "Push application-user.yml with nexxis.overlay.noVideoOverlayId = myEmptyOverlay "
+            "Push application-user.yml with nexxis.overlay.noVideoOverlayId = matrixEmptyOverlay "
             "and restart barco-nms",
         )
         self.remove_overlay_btn.clicked.connect(self._remove_overlay)

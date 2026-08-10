@@ -79,12 +79,23 @@ def golden_nms_config_path(bandwidth: str) -> Path:
 NMS_USER_CONFIG_TEMPLATE = GOLDEN_FILES_DIR / "application-user.yml.template"
 
 
-def render_nms_user_config(room: "Room", bandwidth_kbps: int) -> str:
+def render_nms_user_config(
+    room: "Room", bandwidth_kbps: int, remove_overlay: bool = False
+) -> str:
     """Render the barco-nms ``application-user.yml`` for a room with the given
-    interop link bandwidth (kbps) applied to both upload and download."""
+    interop link bandwidth (kbps) applied to both upload and download.
+
+    ``remove_overlay`` controls whether ``nexxis.overlay.noVideoOverlayId`` is
+    included; it is independent of the bandwidth setting so bandwidth pushes
+    don't silently strip the overlay and the "remove overlay" action doesn't
+    silently reset bandwidth.
+    """
     text = NMS_USER_CONFIG_TEMPLATE.read_text(encoding="utf-8")
-    return text.replace("__IP__", room.room_id).replace(
-        "__BANDWIDTH__", str(bandwidth_kbps)
+    overlay_line = "    noVideoOverlayId: matrixEmptyOverlay\n" if remove_overlay else ""
+    return (
+        text.replace("__IP__", room.room_id)
+        .replace("__BANDWIDTH__", str(bandwidth_kbps))
+        .replace("__OVERLAY_LINE__", overlay_line)
     )
 
 

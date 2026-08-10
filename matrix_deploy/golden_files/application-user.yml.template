@@ -16,8 +16,7 @@ nexxis:
     empty:
       slot:
         color: "#000000"
-    noVideoOverlayId: myEmptyOverlay
-  rootDir: /opt/barco/nms
+__OVERLAY_LINE__  rootDir: /opt/barco/nms
   configDir: /etc/barco/nms
   logging:
     folder: /var/log/barco/nms

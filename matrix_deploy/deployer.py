@@ -772,16 +772,22 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def deploy_nms_link_bandwidth(self, room: Room, bandwidth_kbps: int) -> bool:
+    def deploy_nms_link_bandwidth(
+        self, room: Room, bandwidth_kbps: int, remove_overlay: bool = False
+    ) -> bool:
         """Render and push ``application-user.yml`` with the given interop link
         bandwidth (kbps, applied to both upload and download) and restart
-        the barco-nms service so it takes effect."""
-        self.log(
-            f"=== OR {room.number}: Setting NMS interop bandwidth to {bandwidth_kbps} ===",
-            "info",
-        )
+        the barco-nms service so it takes effect.
+
+        ``remove_overlay`` is independent of the bandwidth value - it only
+        controls whether ``nexxis.overlay.noVideoOverlayId`` is included."""
+        if not remove_overlay:
+            self.log(
+                f"=== OR {room.number}: Setting NMS interop bandwidth to {bandwidth_kbps} ===",
+                "info",
+            )
         try:
-            content = render_nms_user_config(room, bandwidth_kbps)
+            content = render_nms_user_config(room, bandwidth_kbps, remove_overlay)
         except Exception as exc:  # noqa: BLE001
             self.log(f"Failed to render application-user.yml: {exc}", "error")
             return False
@@ -816,6 +822,7 @@ class Deployer:
             self.log("Applying application-user.yml and restarting barco-nms...", "detail")
             cmd = (
                 f"{sudo} cp {shlex.quote(remote_staging)} {shlex.quote(conn.remote_nms_user_config_path)} "
+                f"&& {sudo} systemctl reset-failed {shlex.quote(conn.nms_service_name)} "
                 f"&& {sudo} systemctl restart {shlex.quote(conn.nms_service_name)} "
                 f"&& {sudo} systemctl --no-pager --full status {shlex.quote(conn.nms_service_name)} -n 10"
             )
@@ -827,7 +834,10 @@ class Deployer:
                 return False
             self._advance()  # applied
 
-            self.log(f"OR {room.number}: NMS interop bandwidth set to {bandwidth_kbps}.", "success")
+            if remove_overlay:
+                self.log(f"OR {room.number}: video overlay removed.", "success")
+            else:
+                self.log(f"OR {room.number}: NMS interop bandwidth set to {bandwidth_kbps}.", "success")
             return True
         finally:
             if tmp_path:
@@ -840,11 +850,46 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _read_current_nms_bandwidth(self, room: Room) -> Optional[int]:
+        """Best-effort read of the room's currently-applied interop bandwidth
+        from the live ``application-user.yml``, so actions that only need to
+        change one setting (e.g. the overlay flag) don't have to guess/reset
+        the other."""
+        try:
+            client = connect(self._target(room))
+        except SSHError:
+            return None
+        try:
+            lines: List[str] = []
+            prefix = self._read_sudo_prefix()
+            cmd = f"{prefix} cat {shlex.quote(self.config.connection.remote_nms_user_config_path)}".strip()
+            exit_status = run_command(client, cmd, on_line=lines.append)
+            if exit_status != 0:
+                return None
+            match = re.search(r"upload:\s*(\d+)", "\n".join(lines))
+            return int(match.group(1)) if match else None
+        except Exception:  # noqa: BLE001
+            return None
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def deploy_nms_remove_overlay(self, room: Room, bandwidth_kbps: int = 500000) -> bool:
-        """Push application-user.yml (which sets nexxis.overlay.noVideoOverlayId =
-        myEmptyOverlay) and restart barco-nms so the video overlay is removed."""
+        """Push application-user.yml with nexxis.overlay.noVideoOverlayId =
+        matrixEmptyOverlay and restart barco-nms so the video overlay is
+        removed, without changing the room's current interop bandwidth."""
         self.log(f"=== OR {room.number}: Removing video overlay ===", "info")
-        return self.deploy_nms_link_bandwidth(room, bandwidth_kbps)
+        current = self._read_current_nms_bandwidth(room)
+        if current is not None:
+            bandwidth_kbps = current
+        else:
+            self.log(
+                f"Could not read current interop bandwidth; leaving it at {bandwidth_kbps}.",
+                "warning",
+            )
+        return self.deploy_nms_link_bandwidth(room, bandwidth_kbps, remove_overlay=True)
 
     def deploy_matrix_api_certs(self, room: Room) -> bool:
         """Disable the cert-init/unseal units, generate a fresh self-signed
