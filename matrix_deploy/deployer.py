@@ -714,6 +714,31 @@ class Deployer:
         self.log("System did not come back online within timeout.", "error")
         return False
 
+    def shutdown(self, room: Room) -> bool:
+        """Connect to a room and trigger a shutdown (power off, no reboot)."""
+        self.log(f"=== OR {room.number}: Shutting down ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            sudo = self._sudo_prefix()
+            self.log("Sending shutdown command...", "detail")
+            # exec_command returns immediately; the shutdown will terminate the
+            # SSH session from the remote side.
+            client.exec_command(f"{sudo} shutdown -h now", get_pty=True)
+            # Give the command a moment to start before we close the local handle.
+            time.sleep(2)
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        self.log(f"OR {room.number}: shutdown command sent.", "success")
+        return True
+
     def deploy_golden_nms_config(self, room: Room, bandwidth: str) -> bool:
         """Push the bundled golden ``nms-config.json`` (MAX or LIMITED bandwidth)
         to a room and restart the service so it takes effect."""

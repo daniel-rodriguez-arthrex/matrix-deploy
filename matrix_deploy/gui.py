@@ -825,6 +825,11 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.reboot_btn.clicked.connect(self._reboot)
 
+        self.shutdown_btn = self._make_button(
+            "Shutdown", "danger", "Shut down (power off) selected rooms", icon=QStyle.SP_ComputerIcon
+        )
+        self.shutdown_btn.clicked.connect(self._shutdown)
+
         self.matrix_api_certs_btn = self._make_button(
             "matrix-api-certs",
             "danger",
@@ -863,6 +868,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.stop_service_btn,
                 self.stop_nms_btn,
                 self.reboot_btn,
+                self.shutdown_btn,
                 self.matrix_api_certs_btn,
                 self.fix_room_config_race_btn,
                 self.log_debug_btn,
@@ -1518,6 +1524,9 @@ class MatrixDeployWindow(QMainWindow):
 
     def _reboot(self) -> None:
         self._run_system_action("reboot", "Reboot")
+
+    def _shutdown(self) -> None:
+        self._run_system_action("shutdown", "Shutdown")
 
     def _matrix_api_certs(self) -> None:
         self._run_system_action("matrix_api_certs", "matrix-api-certs")

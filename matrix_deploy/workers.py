@@ -95,6 +95,8 @@ class SystemActionWorker(QThread):
                 ok = deployer.stop_nms_service(room)
             elif self.action == "reboot":
                 ok = deployer.reboot(room)
+            elif self.action == "shutdown":
+                ok = deployer.shutdown(room)
             elif self.action == "nms_bandwidth":
                 ok = deployer.deploy_golden_nms_config(room, self.bandwidth)
             elif self.action == "nms_link_bandwidth":

@@ -68,6 +68,14 @@ class BuildResult:
     build_url: Optional[str]
 
 
+def _is_login_redirect(location: str) -> bool:
+    """True if a redirect ``Location`` points at a login/SSO flow rather
+    than a normal Jenkins page (e.g. the job/queue page after a successful
+    trigger)."""
+    location = location.lower()
+    return "commencelogin" in location or "/login" in location
+
+
 def _describe_response(resp: requests.Response) -> str:
     """Best-effort human-readable summary of a failed response: status,
     server/auth headers, and a truncated body preview (HTML login pages,
@@ -103,8 +111,24 @@ class JenkinsClient:
         disabled (``crumbIssuer`` returns 404).
         """
         resp = self.session.get(
-            f"{self.url}/crumbIssuer/api/json", auth=self.auth, timeout=15
+            f"{self.url}/crumbIssuer/api/json",
+            auth=self.auth,
+            timeout=15,
+            allow_redirects=False,
         )
+        if resp.status_code in (301, 302, 303, 307, 308):
+            location = resp.headers.get("Location", "")
+            if log is not None:
+                log(f"Redirected to: {location}", "detail")
+            if _is_login_redirect(location):
+                raise JenkinsError(
+                    "Jenkins redirected this request to a login page instead of "
+                    "accepting the token - the token is likely expired/revoked, "
+                    "or this Jenkins requires an active logged-in browser session "
+                    f"for API access. Log into {self.url} in a browser and/or "
+                    "generate a fresh API token, then try again."
+                )
+            raise JenkinsError(f"Unexpected redirect fetching CSRF crumb: {location}")
         if resp.status_code == 404:
             return {}
         if resp.status_code == 401:
@@ -200,6 +224,18 @@ class JenkinsClient:
             allow_redirects=False,
         )
 
+        location = resp.headers.get("Location", "")
+        if resp.status_code in (301, 302, 303, 307, 308) and _is_login_redirect(location):
+            if log is not None:
+                log(f"Redirected to: {location}", "detail")
+            raise JenkinsError(
+                "Jenkins redirected this request to a login page instead of "
+                "accepting the token - the token is likely expired/revoked, "
+                "or this Jenkins requires an active logged-in browser session "
+                f"for API access. Log into {self.url} in a browser and/or "
+                "generate a fresh API token, then try again."
+            )
+
         if resp.status_code not in (200, 201, 302, 303):
             if log is not None:
                 log(_describe_response(resp), "detail")
@@ -219,7 +255,7 @@ class JenkinsClient:
                 )
             raise JenkinsError(f"Unexpected response from Jenkins (HTTP {resp.status_code}).")
 
-        queue_url = resp.headers.get("Location")
+        queue_url = location or None
         build_number: Optional[int] = None
         build_url: Optional[str] = None
         if queue_url and wait_for_number:
