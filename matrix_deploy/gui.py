@@ -36,6 +36,7 @@ from PyQt5.QtWidgets import (
     QStyle,
     QTabBar,
     QTabWidget,
+    QTextBrowser,
     QTextEdit,
     QToolButton,
     QVBoxLayout,
@@ -46,6 +47,7 @@ from .artifactory import ArtifactoryCredentials
 from .config import AppConfig, Room
 from .deployer import DeploymentCredentials
 from .env_settings import load_env_secrets, load_env_settings
+from .faq_content import FAQ_SECTIONS
 from .jenkins import JenkinsCredentials
 from .workers import (
     BuildTriggerWorker,
@@ -140,23 +142,44 @@ def _button_style(bg: str) -> str:
     )
 
 
+# Supersample factors we pre-render every hand-drawn icon at. Qt's QSS/pixmap
+# loader auto-picks the matching ``file@2x.png`` / ``file@3x.png`` variant for
+# the target device-pixel-ratio, so icons stay crisp at 100%/150%/200% and
+# when the window is dragged between monitors of different DPI.
+_HIDPI_SCALES = (1, 2, 3)
+
+
+def _atnx_path(base: Path, scale: int) -> Path:
+    """Return the Qt high-DPI ``@Nx`` sibling of ``base`` (``base`` itself for 1x)."""
+    if scale == 1:
+        return base
+    return base.with_name(f"{base.stem}@{scale}x{base.suffix}")
+
+
 def _make_chevron_icon(color: str, width: int = 12, height: int = 8) -> str:
-    """Render a down-chevron of the given size to a cached PNG and return its
-    file path.
+    """Render a down-chevron and return its base (1x) file path.
 
     QSS's CSS-border triangle trick doesn't render reliably under the Fusion
-    style on all Qt builds, so we draw a real icon once (per color/size) and
+    style on all Qt builds, so we draw a real icon (per color/size) and
     reference it via ``image: url(...)`` instead. ``width``/``height`` also
     drive the QSS ``::indicator``/``::down-arrow`` box size, which is what
     Qt uses for hit-testing - i.e. making these bigger also enlarges the
     clickable area, not just the drawn icon.
+
+    The icon is rendered at each ``_HIDPI_SCALES`` factor into ``@Nx`` files so
+    it stays sharp on High-DPI / mixed-DPI displays instead of being bitmap
+    stretched.
     """
     safe_name = f"{color.lstrip('#')}_{width}x{height}"
-    path = Path(tempfile.gettempdir()) / f"matrix_deploy_chevron_{safe_name}.png"
-    if not path.exists():
-        margin_x = max(1, round(width * 1 / 12))
-        margin_y = max(1, round(height * 1 / 8))
-        pixmap = QPixmap(width, height)
+    base = Path(tempfile.gettempdir()) / f"matrix_deploy_chevron_{safe_name}.png"
+    for scale in _HIDPI_SCALES:
+        target = _atnx_path(base, scale)
+        if target.exists():
+            continue
+        w, h = width * scale, height * scale
+        margin_x = max(1, round(w / 12))
+        margin_y = max(1, round(h / 8))
+        pixmap = QPixmap(w, h)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -166,14 +189,61 @@ def _make_chevron_icon(color: str, width: int = 12, height: int = 8) -> str:
             QPolygon(
                 [
                     QPoint(margin_x, margin_y),
-                    QPoint(width - margin_x, margin_y),
-                    QPoint(width // 2, height - margin_y),
+                    QPoint(w - margin_x, margin_y),
+                    QPoint(w // 2, h - margin_y),
                 ]
             )
         )
         painter.end()
-        pixmap.save(str(path), "PNG")
-    return str(path).replace("\\", "/")
+        pixmap.save(str(target), "PNG")
+    return str(base).replace("\\", "/")
+
+
+def _make_grip_icon(
+    color: str,
+    orientation: str = "horizontal",
+    lines: int = 3,
+    thickness: int = 2,
+    length: int = 18,
+    gap: int = 2,
+) -> str:
+    """Render a set of parallel grip ridges to a cached PNG and return its path.
+
+    Used on ``QSplitter`` handles so the drag affordance reads clearly (like a
+    classic drag grabber) instead of Fusion's near-invisible default.
+    ``orientation='horizontal'`` stacks horizontal ridges (an ``\u2261`` look,
+    for a vertical splitter's horizontal handle you drag up/down);
+    ``'vertical'`` places vertical ridges side by side (a ``\u2016`` look, for a
+    horizontal splitter's handle you drag left/right).
+
+    Rendered at each ``_HIDPI_SCALES`` factor into ``@Nx`` files so the ridges
+    stay sharp on High-DPI / mixed-DPI displays.
+    """
+    safe = f"{color.lstrip('#')}_{orientation}_{lines}x{thickness}x{length}x{gap}"
+    base = Path(tempfile.gettempdir()) / f"matrix_deploy_grip_{safe}.png"
+    for scale in _HIDPI_SCALES:
+        target = _atnx_path(base, scale)
+        if target.exists():
+            continue
+        t, g, ln = thickness * scale, gap * scale, length * scale
+        span = lines * t + (lines - 1) * g
+        width, height = (ln, span) if orientation == "horizontal" else (span, ln)
+        pixmap = QPixmap(width, height)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(color))
+        radius = t / 2
+        for i in range(lines):
+            offset = i * (t + g)
+            if orientation == "horizontal":
+                painter.drawRoundedRect(0, offset, ln, t, radius, radius)
+            else:
+                painter.drawRoundedRect(offset, 0, t, ln, radius, radius)
+        painter.end()
+        pixmap.save(str(target), "PNG")
+    return str(base).replace("\\", "/")
 
 
 def build_app_stylesheet() -> str:
@@ -187,6 +257,11 @@ def build_app_stylesheet() -> str:
     # doubles as the clickable hit area, which was previously too small
     # to reliably click.
     group_chevron = _make_chevron_icon("#37474F", width=22, height=16)
+    # Grip dots for the resize handles: a horizontal row for the vertical
+    # splitter (drag up/down) and a vertical column for the horizontal one
+    # (drag left/right).
+    grip_h = _make_grip_icon("#546E7A", "horizontal")
+    grip_v = _make_grip_icon("#546E7A", "vertical")
     css = """
 QWidget {
     background-color: #ECEFF1;
@@ -274,6 +349,16 @@ QProgressBar {
     height: 14px;
 }
 QProgressBar::chunk { background-color: #1976D2; border-radius: 3px; }
+QSplitter::handle {
+    background: #CFD8DC;
+    border: 1px solid #B0BEC5;
+    border-radius: 4px;
+    margin: 2px;
+}
+QSplitter::handle:horizontal { width: 11px; image: url(__GRIP_V__); }
+QSplitter::handle:vertical { height: 11px; image: url(__GRIP_H__); }
+QSplitter::handle:hover { background: #BBDEFB; border-color: #64B5F6; }
+QSplitter::handle:pressed { background: #90CAF9; border-color: #1976D2; }
 QStatusBar { background: #CFD8DC; color: #37474F; }
 QToolTip {
     background: #37474F; color: white; border: none; padding: 4px 6px;
@@ -283,6 +368,8 @@ QToolTip {
         css.replace("__CHEVRON__", chevron)
         .replace("__CHEVRON_OPEN__", chevron_open)
         .replace("__GROUP_CHEVRON__", group_chevron)
+        .replace("__GRIP_H__", grip_h)
+        .replace("__GRIP_V__", grip_v)
     )
 
 
@@ -453,7 +540,10 @@ class MatrixDeployWindow(QMainWindow):
         self.setStyleSheet(build_app_stylesheet())
         self._build_ui()
         self._load_settings()
+        self._refresh_config_status()
         self._update_status_bar()
+        # Nudge first-time users to Settings if the essentials are missing.
+        self._warn_if_unconfigured()
 
     # -- UI construction --------------------------------------------------
 
@@ -461,17 +551,31 @@ class MatrixDeployWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
-        root.setContentsMargins(16, 14, 16, 10)
-        root.setSpacing(12)
+        root.setContentsMargins(10, 8, 10, 8)
+        root.setSpacing(0)
 
-        # Connection/files/options/action controls, stacked in a single
-        # widget so they can be collapsed via the splitter below to make
-        # room for the output console.
+        # Window-level tabs keep each workflow uncluttered: the everyday
+        # Deploy flow, one-time Settings/credentials, and a searchable FAQ.
+        self.top_tabs = QTabWidget()
+        self.top_tabs.addTab(self._build_deploy_tab(), "Deploy")
+        self.top_tabs.addTab(self._build_settings_tab(), "Settings")
+        self.top_tabs.addTab(self._build_faq_tab(), "FAQ")
+        root.addWidget(self.top_tabs)
+
+    def _build_deploy_tab(self) -> QWidget:
+        """The main single-page workflow: files, options, actions, the
+        categorized operation buttons, and the rooms/output split."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(6, 8, 6, 6)
+        outer.setSpacing(12)
+
+        # Files/options/action controls stacked in one widget so they can be
+        # collapsed via the splitter below to make room for the console.
         controls = QWidget()
         controls_layout = QVBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(12)
-        controls_layout.addWidget(self._build_connection_group())
         controls_layout.addWidget(self._build_files_group())
         controls_layout.addLayout(self._build_options_row())
         controls_layout.addLayout(self._build_action_row())
@@ -484,6 +588,9 @@ class MatrixDeployWindow(QMainWindow):
         bottom_split.setStretchFactor(0, 2)
         bottom_split.setStretchFactor(1, 3)
         bottom_split.setSizes([420, 700])
+        bottom_split.setHandleWidth(11)
+        bottom_split.setChildrenCollapsible(True)
+        self.bottom_split = bottom_split
 
         # Controls stack on top; rooms/output take the rest by default but
         # this bar can be dragged up to reclaim vertical space for a taller
@@ -495,11 +602,135 @@ class MatrixDeployWindow(QMainWindow):
         main_split.setStretchFactor(1, 1)
         main_split.setCollapsible(0, True)
         main_split.setCollapsible(1, False)
+        main_split.setHandleWidth(11)
         # Give controls just what it needs up front; drag the handle up to
         # reclaim more of that space for the console below.
         main_split.setSizes([controls.sizeHint().height(), 10_000])
+        self.main_split = main_split
 
-        root.addWidget(main_split)
+        # Persistent hints on the drag handles (handle 0 is a hidden no-op;
+        # the real draggable handle is at index 1).
+        main_split.handle(1).setToolTip(
+            "Drag to resize \u2022 collapse the controls to enlarge the output below"
+        )
+        bottom_split.handle(1).setToolTip(
+            "Drag to resize \u2022 give more width to the output or the rooms list"
+        )
+
+        outer.addWidget(main_split)
+        return tab
+
+    def _build_settings_tab(self) -> QWidget:
+        """Credentials/connection config lives here, off the main flow, with a
+        live status banner and an explicit Save."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(6, 8, 6, 6)
+        outer.setSpacing(12)
+
+        # Live configuration status: red until the critical fields are set.
+        self.config_status_label = QLabel()
+        self.config_status_label.setWordWrap(True)
+        self.config_status_label.setStyleSheet(
+            "padding:10px 12px; border-radius:6px; font-weight:600;"
+        )
+        outer.addWidget(self.config_status_label)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        inner = QWidget()
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(12)
+        inner_layout.addWidget(self._build_connection_group())
+
+        note = QLabel(
+            "Secrets (passwords/tokens) are never saved to disk. Non-secret "
+            "fields are saved to ~/.matrix_deploy_settings.json. You can also "
+            "prefill fields from a gitignored .env file - see the FAQ."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#607D8B; font-size:12px;")
+        inner_layout.addWidget(note)
+        inner_layout.addStretch()
+        scroll.setWidget(inner)
+        outer.addWidget(scroll, stretch=1)
+
+        save_row = QHBoxLayout()
+        save_row.addStretch()
+        save_btn = self._make_button(
+            "Save Settings", "primary", icon=QStyle.SP_DialogSaveButton
+        )
+        save_btn.clicked.connect(self._save_settings_clicked)
+        save_row.addWidget(save_btn)
+        outer.addLayout(save_row)
+        return tab
+
+    def _build_faq_tab(self) -> QWidget:
+        """Searchable reference page rendered from ``faq_content.FAQ_SECTIONS``."""
+        tab = QWidget()
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(6, 8, 6, 6)
+        outer.setSpacing(8)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Search:"))
+        self.faq_search_input = QLineEdit()
+        self.faq_search_input.setPlaceholderText(
+            "Find a command or topic, then press Enter to jump to the next match"
+        )
+        self.faq_search_input.returnPressed.connect(self._faq_search_next)
+        self.faq_search_input.textChanged.connect(self._faq_search_reset)
+        search_row.addWidget(self.faq_search_input, stretch=1)
+        find_btn = self._make_button("Find Next", "utility")
+        find_btn.clicked.connect(self._faq_search_next)
+        search_row.addWidget(find_btn)
+        outer.addLayout(search_row)
+
+        self.faq_browser = QTextBrowser()
+        self.faq_browser.setOpenExternalLinks(True)
+        self.faq_browser.setStyleSheet(
+            "QTextBrowser { background:#FFFFFF; border:1px solid #CFD8DC;"
+            "border-radius:6px; padding:10px; }"
+        )
+        self.faq_browser.setHtml(self._build_faq_html())
+        outer.addWidget(self.faq_browser, stretch=1)
+        return tab
+
+    @staticmethod
+    def _build_faq_html() -> str:
+        parts = [
+            "<style>"
+            "h2 { color:#1565C0; border-bottom:2px solid #90CAF9; padding-bottom:4px;"
+            " margin-top:18px; }"
+            "h3 { color:#37474F; margin-bottom:2px; }"
+            "code { background:#ECEFF1; color:#C62828; padding:1px 4px;"
+            " border-radius:3px; font-family:Consolas,monospace; }"
+            "p, li { color:#263238; line-height:1.5; }"
+            "</style>"
+            "<h1>Matrix Deploy - Reference</h1>"
+        ]
+        for title, items in FAQ_SECTIONS:
+            parts.append(f"<h2>{title}</h2>")
+            for question, answer in items:
+                parts.append(f"<h3>{question}</h3>")
+                parts.append(f"<p>{answer}</p>")
+        return "".join(parts)
+
+    def _faq_search_reset(self) -> None:
+        # Move the cursor to the top so the next search starts from the
+        # beginning whenever the query changes.
+        self.faq_browser.moveCursor(QTextCursor.Start)
+
+    def _faq_search_next(self) -> None:
+        term = self.faq_search_input.text().strip()
+        if not term:
+            return
+        if not self.faq_browser.find(term):
+            # Wrap around to the top and try once more.
+            self.faq_browser.moveCursor(QTextCursor.Start)
+            if not self.faq_browser.find(term):
+                self.statusBar().showMessage(f"No match for '{term}'", 2000)
 
     @staticmethod
     def _password_toggle(line_edit: QLineEdit) -> QToolButton:
@@ -579,6 +810,11 @@ class MatrixDeployWindow(QMainWindow):
         self.jenkins_token_input.setPlaceholderText("API token (not saved to disk)")
         layout.addWidget(self.jenkins_token_input, 7, 1)
         layout.addWidget(self._password_toggle(self.jenkins_token_input), 7, 2)
+
+        # Live-refresh the configuration status banner as the critical fields
+        # are edited.
+        self.router_ip_input.textChanged.connect(self._refresh_config_status)
+        self.username_input.textChanged.connect(self._refresh_config_status)
 
         group.setLayout(layout)
         return group
@@ -771,21 +1007,27 @@ class MatrixDeployWindow(QMainWindow):
         return row
 
     @staticmethod
-    def _button_group(title: str, buttons: List[QPushButton]) -> QGroupBox:
+    def _button_group(
+        title: str, buttons: List[QPushButton], columns: int = 2
+    ) -> QGroupBox:
         """Wrap a set of related buttons in a titled, collapsible frame
-        (inherits global QGroupBox styling). Buttons stretch equally to fill
-        the frame. Click the checkbox in the title to collapse/expand the
-        group - handy once several groups are on screen at once."""
+        (inherits global QGroupBox styling). Buttons are laid out in a grid
+        that wraps every ``columns`` items, so groups with many actions (e.g.
+        Services) breathe instead of being crammed into one row. Click the
+        checkbox in the title to collapse/expand the group."""
         box = QGroupBox(title)
         box.setCheckable(True)
         box.setChecked(True)
         box.setToolTip("Click to collapse/expand this group")
-        inner = QHBoxLayout()
-        inner.setContentsMargins(8, 6, 8, 8)
-        inner.setSpacing(6)
-        for btn in buttons:
-            inner.addWidget(btn, stretch=1)
-        box.setLayout(inner)
+        grid = QGridLayout()
+        grid.setContentsMargins(8, 6, 8, 8)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        for i, btn in enumerate(buttons):
+            grid.addWidget(btn, i // columns, i % columns)
+        for col in range(columns):
+            grid.setColumnStretch(col, 1)
+        box.setLayout(grid)
 
         def _toggle(checked: bool, _buttons=buttons) -> None:
             for b in _buttons:
@@ -887,6 +1129,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.fix_room_config_race_btn,
                 self.log_debug_btn,
             ],
+            columns=2,
         )
 
         # --- Bandwidth (config pushes) -----------------------------------
@@ -935,6 +1178,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.link_bw_low_btn,
                 self.remove_overlay_btn,
             ],
+            columns=2,
         )
 
         # --- Diagnostics (read-only) -------------------------------------
@@ -981,6 +1225,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.get_nms_password_btn,
                 self.remove_fingerprint_btn,
             ],
+            columns=2,
         )
 
         # --- Live Logs (streaming, read-only) -----------------------------
@@ -1007,15 +1252,19 @@ class MatrixDeployWindow(QMainWindow):
         live_logs_box = self._button_group(
             "Live Logs",
             [self.watch_matrix_api_btn, self.watch_nms_btn],
+            columns=1,
         )
 
-        # Proportional stretch (by button count) keeps every button ~equal width.
+        # Each group now wraps its buttons into a 2-col grid, so stretch by
+        # column count keeps the grids roughly aligned across the row and the
+        # groups top-aligned.
         row = QHBoxLayout()
         row.setSpacing(12)
-        row.addWidget(services_box, stretch=3)
-        row.addWidget(bandwidth_box, stretch=4)
-        row.addWidget(diagnostics_box, stretch=3)
-        row.addWidget(live_logs_box, stretch=2)
+        row.addWidget(services_box, stretch=2)
+        row.addWidget(bandwidth_box, stretch=2)
+        row.addWidget(diagnostics_box, stretch=2)
+        row.addWidget(live_logs_box, stretch=1)
+        row.setAlignment(Qt.AlignTop)
         return row
 
     def _build_terminal_group(self) -> QGroupBox:
@@ -1033,6 +1282,16 @@ class MatrixDeployWindow(QMainWindow):
         cv.setContentsMargins(6, 6, 6, 6)
         cv.setSpacing(6)
         c_toolbar = QHBoxLayout()
+        self.maximize_output_btn = self._make_button(
+            "Maximize",
+            "utility",
+            tooltip="Collapse the controls and rooms list to enlarge this output. "
+            "Click again to restore.",
+            icon=QStyle.SP_TitleBarMaxButton,
+        )
+        self.maximize_output_btn.setCheckable(True)
+        self.maximize_output_btn.toggled.connect(self._toggle_maximize_output)
+        c_toolbar.addWidget(self.maximize_output_btn)
         c_toolbar.addStretch()
         copy_btn = self._make_button("Copy", "utility", icon=QStyle.SP_FileDialogDetailedView)
         copy_btn.clicked.connect(self._copy_terminal)
@@ -1058,6 +1317,23 @@ class MatrixDeployWindow(QMainWindow):
     def _copy_terminal(self) -> None:
         _copy_raw(self.combined_console)
         self.statusBar().showMessage("Output copied to clipboard", 2000)
+
+    def _toggle_maximize_output(self, maximized: bool) -> None:
+        """One-click expand: collapse the controls stack and the rooms list so
+        the Output console takes the whole tab, and restore the prior sizes on
+        toggle-off."""
+        if maximized:
+            self._saved_main_sizes = self.main_split.sizes()
+            self._saved_bottom_sizes = self.bottom_split.sizes()
+            self.main_split.setSizes([0, 10_000])
+            self.bottom_split.setSizes([0, 10_000])
+            self.maximize_output_btn.setText("Restore")
+        else:
+            if getattr(self, "_saved_main_sizes", None):
+                self.main_split.setSizes(self._saved_main_sizes)
+            if getattr(self, "_saved_bottom_sizes", None):
+                self.bottom_split.setSizes(self._saved_bottom_sizes)
+            self.maximize_output_btn.setText("Maximize")
 
     def _on_tab_close_requested(self, index: int) -> None:
         if index == 0:
@@ -1311,6 +1587,8 @@ class MatrixDeployWindow(QMainWindow):
         """Open a single room's NMS demonstrator GUI in the browser and
         fetch/display its admin password using the existing NMS password
         (act-mfg-eeprom) logic."""
+        if not self._require_connection():
+            return
         if room.number in self._busy_rooms:
             QMessageBox.warning(
                 self,
@@ -1391,6 +1669,8 @@ class MatrixDeployWindow(QMainWindow):
             )
 
     def _start_deployment(self) -> None:
+        if not self._require_connection():
+            return
         rooms = self._selected_rooms()
         if not rooms:
             QMessageBox.warning(self, "No Rooms", "Select at least one operating room.")
@@ -1426,6 +1706,19 @@ class MatrixDeployWindow(QMainWindow):
                 "These rooms already have a running job:\n"
                 + ", ".join(r.name for r in busy),
             )
+            return
+
+        # Final confirmation - deployments are disruptive and easy to fire on
+        # the wrong rooms/operation by accident.
+        reply = QMessageBox.question(
+            self,
+            "Confirm Deployment",
+            f"Start '{op}' on {len(rooms)} room(s)?\n\n"
+            + ", ".join(r.name for r in rooms),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
             return
 
         # Reset badges and progress bars for selected rooms.
@@ -1466,6 +1759,8 @@ class MatrixDeployWindow(QMainWindow):
         require_sudo: bool = True,
         confirm: bool = True,
     ) -> None:
+        if not self._require_connection():
+            return
         rooms = self._selected_rooms()
         if not rooms:
             QMessageBox.warning(self, "No Rooms", "Select at least one operating room.")
@@ -1619,6 +1914,8 @@ class MatrixDeployWindow(QMainWindow):
         watching logs while a deploy/system action runs on the same room is a
         normal, safe use case.
         """
+        if not self._require_connection():
+            return
         rooms = self._selected_rooms()
         if not rooms:
             QMessageBox.warning(self, "No Rooms", "Select at least one operating room.")
@@ -1646,6 +1943,73 @@ class MatrixDeployWindow(QMainWindow):
 
     def _watch_nms_live(self) -> None:
         self._watch_service_live(self.config.connection.nms_service_name, "Watch NMS")
+
+    # -- configuration validation ----------------------------------------
+
+    def _missing_critical(self) -> List[str]:
+        """Labels of critical connection fields that are still blank. These
+        are required for any room operation."""
+        missing = []
+        if not self.router_ip_input.text().strip():
+            missing.append("Router IP")
+        if not self.username_input.text().strip():
+            missing.append("SSH Username")
+        return missing
+
+    def _refresh_config_status(self) -> None:
+        """Repaint the Settings-tab status banner from current field state."""
+        label = getattr(self, "config_status_label", None)
+        if label is None:
+            return
+        missing = self._missing_critical()
+        if missing:
+            label.setText(
+                "\u26a0  Not ready: fill in " + " and ".join(missing)
+                + " before running any room operation."
+            )
+            label.setStyleSheet(
+                "padding:10px 12px; border-radius:6px; font-weight:600;"
+                "background:#FDECEA; color:#C62828; border:1px solid #F5C6CB;"
+            )
+        else:
+            label.setText("\u2713  Ready: required connection settings are set.")
+            label.setStyleSheet(
+                "padding:10px 12px; border-radius:6px; font-weight:600;"
+                "background:#E8F5E9; color:#2E7D32; border:1px solid #A5D6A7;"
+            )
+
+    def _warn_if_unconfigured(self) -> None:
+        missing = self._missing_critical()
+        if not missing:
+            return
+        self.top_tabs.setCurrentIndex(1)  # Settings tab
+        QMessageBox.information(
+            self,
+            "Configuration Needed",
+            "Before using Matrix Deploy, set the following in the Settings "
+            "tab:\n\n\u2022 " + "\n\u2022 ".join(missing)
+            + "\n\nMost operations also need the Sudo Password.",
+        )
+
+    def _require_connection(self) -> bool:
+        """Gate for room operations. Returns True if the critical connection
+        fields are set; otherwise warns, jumps to Settings, and returns False."""
+        missing = self._missing_critical()
+        if not missing:
+            return True
+        self.top_tabs.setCurrentIndex(1)  # Settings tab
+        QMessageBox.warning(
+            self,
+            "Configuration Needed",
+            "Set the following in the Settings tab first:\n\n\u2022 "
+            + "\n\u2022 ".join(missing),
+        )
+        return False
+
+    def _save_settings_clicked(self) -> None:
+        self._save_settings()
+        self._refresh_config_status()
+        self.statusBar().showMessage("Settings saved", 2000)
 
     # -- settings persistence --------------------------------------------
 
