@@ -6,6 +6,7 @@ All deployment logic uses this module so connection handling lives in one place.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -31,6 +32,21 @@ class SSHTarget:
 
 class SSHError(Exception):
     """Raised when an SSH operation fails."""
+
+
+# Requesting a PTY (needed for sudo password prompts and colorized/paged
+# tools like swupdate-client) makes remote programs think they're talking to
+# a real terminal, so things like ``systemctl status`` emit ANSI color codes
+# and OSC 8 hyperlink escapes. Our log views are plain text, so strip both
+# before handing lines to callers instead of showing the raw escape bytes.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;:]*[A-Za-z]")
+_OSC_HYPERLINK_RE = re.compile(r"\x1b\]8;[^\x1b]*\x1b\\")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI CSI color/style codes and OSC 8 hyperlink escapes."""
+    text = _OSC_HYPERLINK_RE.sub("", text)
+    return _ANSI_CSI_RE.sub("", text)
 
 
 def connect(target: SSHTarget, timeout: int = 10) -> paramiko.SSHClient:
@@ -92,7 +108,13 @@ def run_command(
         for raw in stdout:
             # PTY sessions terminate lines with "\r\n"; strip both so a
             # trailing "\r" doesn't render as a blank line downstream.
-            on_line(raw.rstrip("\r\n"))
+            line = raw.rstrip("\r\n")
+            if get_pty:
+                # PTY output may carry ANSI color/hyperlink escapes (e.g.
+                # from `systemctl status`) that render as garbage in our
+                # plain-text log views.
+                line = strip_ansi(line)
+            on_line(line)
     exit_status = stdout.channel.recv_exit_status()
     if on_line is not None and not get_pty:
         err = stderr.read().decode(errors="replace").strip()

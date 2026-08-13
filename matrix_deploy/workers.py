@@ -93,6 +93,10 @@ class SystemActionWorker(QThread):
                 ok = deployer.stop_service(room)
             elif self.action == "stop_nms_service":
                 ok = deployer.stop_nms_service(room)
+            elif self.action == "matrix_api_status":
+                ok = deployer.matrix_api_status(room)
+            elif self.action == "nms_status":
+                ok = deployer.nms_service_status(room)
             elif self.action == "reboot":
                 ok = deployer.reboot(room)
             elif self.action == "shutdown":

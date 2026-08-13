@@ -469,6 +469,55 @@ class Deployer:
         """Connect to a room and stop the barco-nms service."""
         return self._stop_service_on_room(room, self.config.connection.nms_service_name)
 
+    def _service_status(
+        self, client: paramiko.SSHClient, room: Room, service_name: str
+    ) -> bool:
+        """Read-only ``systemctl status`` for the given service, streamed to the log."""
+        prefix = self._read_sudo_prefix()
+        cmd = (
+            f"{prefix} systemctl --no-pager --full status {shlex.quote(service_name)} -n 20"
+        ).strip()
+        # `systemctl status` exit codes reflect unit state (0=active, 3=inactive/
+        # failed, 4=unit not found), not command failure - log whatever comes
+        # back and only treat this as a hard failure if we got no output at all.
+        collected: List[str] = []
+
+        def _on_line(line: str) -> None:
+            collected.append(line)
+            self.log(line, "detail")
+
+        run_command(client, cmd, get_pty=True, on_line=_on_line)
+        return bool(collected)
+
+    def _service_status_on_room(self, room: Room, service_name: str) -> bool:
+        """Connect to a room and report the given service's status."""
+        self.log(f"=== OR {room.number}: {service_name} status ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            ok = self._service_status(client, room, service_name)
+            self._advance()
+            if not ok:
+                self.log("Could not retrieve service status.", "error")
+            return ok
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def matrix_api_status(self, room: Room) -> bool:
+        """Connect to a room and report the matrix-api service status."""
+        return self._service_status_on_room(room, self.config.connection.service_name)
+
+    def nms_service_status(self, room: Room) -> bool:
+        """Connect to a room and report the barco-nms service status."""
+        return self._service_status_on_room(room, self.config.connection.nms_service_name)
+
     def _read_sudo_prefix(self) -> str:
         """Sudo prefix for read-only commands: only elevate if a password is
         available, otherwise run unprivileged (avoids a hanging password prompt)."""

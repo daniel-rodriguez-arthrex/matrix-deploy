@@ -808,6 +808,18 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.restart_nms_btn.clicked.connect(self._restart_nms_service)
 
+        self.status_service_btn = self._make_button(
+            "Status: matrix-api", "utility", "Show systemctl status for matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.status_service_btn.clicked.connect(self._matrix_api_status)
+
+        self.status_nms_btn = self._make_button(
+            "Status: NMS", "utility", "Show systemctl status for barco-nms on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.status_nms_btn.clicked.connect(self._nms_status)
+
         self.stop_service_btn = self._make_button(
             "Stop matrix-api", "danger", "Stop the matrix-api service on selected rooms",
             icon=QStyle.SP_MediaStop,
@@ -865,6 +877,8 @@ class MatrixDeployWindow(QMainWindow):
             [
                 self.restart_service_btn,
                 self.restart_nms_btn,
+                self.status_service_btn,
+                self.status_nms_btn,
                 self.stop_service_btn,
                 self.stop_nms_btn,
                 self.reboot_btn,
@@ -1515,6 +1529,16 @@ class MatrixDeployWindow(QMainWindow):
 
     def _restart_nms_service(self) -> None:
         self._run_system_action("restart_nms_service", "Restart NMS")
+
+    def _matrix_api_status(self) -> None:
+        self._run_system_action(
+            "matrix_api_status", "Status: matrix-api", require_sudo=False, confirm=False
+        )
+
+    def _nms_status(self) -> None:
+        self._run_system_action(
+            "nms_status", "Status: NMS", require_sudo=False, confirm=False
+        )
 
     def _stop_service(self) -> None:
         self._run_system_action("stop_service", "Stop matrix-api")
