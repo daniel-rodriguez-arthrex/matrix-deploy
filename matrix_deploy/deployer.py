@@ -25,6 +25,7 @@ from .ssh_client import (
     SSHError,
     SSHTarget,
     connect,
+    get_disk_free_kb,
     run_command,
     upload_file,
     wait_for_reboot,
@@ -256,6 +257,71 @@ class Deployer:
                     return m.group(1)
         return None
 
+    def _check_swu_space(self, client: paramiko.SSHClient, swu_file: Path) -> bool:
+        """Abort early if /tmp doesn't have room for swupdate to extract the
+        SWU's artifacts, instead of uploading and failing mid-install.
+
+        swupdate's ``check_free_space`` fails when the extracted artifact
+        (dominated by the rootfs image) doesn't fit in /tmp; that required
+        size tracks the SWU file's own size, so we compare against it with a
+        safety margin rather than trying to inspect the SWU contents.
+        """
+        swu_size_kb = swu_file.stat().st_size / 1024
+        required_kb = swu_size_kb * 1.15  # 15% margin for non-artifact overhead
+
+        free_kb = get_disk_free_kb(client, "/tmp")
+        if free_kb is None:
+            self.log("Could not determine free space on /tmp; proceeding anyway.", "warning")
+            return True
+
+        if free_kb < required_kb:
+            self.log(
+                f"Not enough free space on /tmp to install {swu_file.name}: "
+                f"need ~{required_kb / 1024:.0f} MB, have {free_kb / 1024:.0f} MB free. "
+                "Free up space on the device (e.g. journalctl --vacuum-size, "
+                "old logs/tmp files) and try again.",
+                "error",
+            )
+            return False
+
+        self.log(
+            f"/tmp free space check OK: {free_kb / 1024:.0f} MB available "
+            f"(need ~{required_kb / 1024:.0f} MB).",
+            "detail",
+        )
+        return True
+
+    def check_disk_space(self, room: Room, path: str = "/tmp") -> bool:
+        """Connect to a room and report free space on the filesystem containing
+        ``path`` (defaults to /tmp, where swupdate extracts SWU artifacts)."""
+        self.log(f"=== OR {room.number}: Disk space ({path}) ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            collected: List[str] = []
+            run_command(
+                client, f"df -h {shlex.quote(path)}", on_line=collected.append
+            )
+            self._advance()
+            if not collected:
+                self.log("Could not retrieve disk space.", "error")
+                return False
+            # Prefix each line with the room number: with several rooms
+            # queried concurrently, lines otherwise interleave in the shared
+            # log with no way to tell which room a given line belongs to.
+            for line in collected:
+                self.log(f"OR {room.number}: {line}", "detail")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _deploy_swu(
         self, client: paramiko.SSHClient, room: Room, swu_file: Optional[Path]
     ) -> bool:
@@ -270,6 +336,9 @@ class Deployer:
 
         # Clean only THIS room's prior staged file (safe on shared host).
         run_command(client, f"rm -f {shlex.quote(remote_path)}")
+
+        if not self._check_swu_space(client, swu_file):
+            return False
 
         self.log(f"Uploading {swu_file.name}...", "detail")
         try:
@@ -724,6 +793,100 @@ class Deployer:
 
             self.log(
                 f"OR {room.number}: log level set to '{level}' and matrix-api restarted.",
+                "success",
+            )
+            self._advance()  # applied
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def add_trusted_endpoint(self, room: Room, endpoint: str) -> bool:
+        """Read the room's matrix.api.config.json, add ``endpoint`` to
+        ``apiServer.trustedEndPoints`` if not already present, push it back,
+        and restart matrix-api so the change takes effect.
+
+        Only ``apiServer.trustedEndPoints`` is touched; every other field in
+        the existing config is preserved exactly as-is. No-op (still
+        restarts) if the endpoint is already trusted.
+        """
+        conn = self.config.connection
+        self.log(
+            f"=== OR {room.number}: Adding trusted endpoint '{endpoint}' ===", "info"
+        )
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+
+        try:
+            self._begin(3)
+
+            # 1. Read the current config off the room.
+            self.log("Reading current matrix.api.config.json...", "detail")
+            prefix = self._read_sudo_prefix()
+            cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
+            collected: List[str] = []
+            exit_status = run_command(
+                client, cmd, get_pty=True, on_line=collected.append
+            )
+            if exit_status != 0:
+                self.log("Failed to read config file.", "error")
+                return False
+
+            raw = "\n".join(collected)
+            if not raw.strip():
+                self.log(
+                    "Config file read returned no output (permission denied, "
+                    "empty file, or a dropped SSH session are the usual causes).",
+                    "error",
+                )
+                return False
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                self.log(f"Could not parse remote config as JSON: {exc}", "error")
+                preview = raw if len(raw) <= 500 else raw[:500] + "... (truncated)"
+                self.log(f"Raw output was: {preview!r}", "detail")
+                return False
+            self._advance()  # read
+
+            # 2. Add the endpoint to apiServer.trustedEndPoints in place.
+            api_server = data.setdefault("apiServer", {})
+            trusted = api_server.setdefault("trustedEndPoints", [])
+            if not isinstance(trusted, list):
+                self.log("apiServer.trustedEndPoints is not a list; aborting.", "error")
+                return False
+            if endpoint in trusted:
+                self.log(f"'{endpoint}' is already trusted.", "detail")
+            else:
+                trusted.append(endpoint)
+
+            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-trustedendpoint.json"
+            local_tmp.write_text(
+                json.dumps(data, indent=2) + "\n", encoding="utf-8"
+            )
+
+            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
+            self.log("Uploading updated config...", "detail")
+            try:
+                upload_file(client, str(local_tmp), remote_staging)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Config upload failed: {exc}", "error")
+                return False
+            self._advance()  # uploaded
+
+            # 3. Apply and restart matrix-api.
+            self.log("Applying config and restarting matrix-api...", "detail")
+            if not self._apply_config_and_restart_service(client, room):
+                self.log("Config apply failed (service restart failed).", "error")
+                return False
+
+            self.log(
+                f"OR {room.number}: '{endpoint}' trusted and matrix-api restarted.",
                 "success",
             )
             self._advance()  # applied

@@ -1062,6 +1062,13 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.status_nms_btn.clicked.connect(self._nms_status)
 
+        self.disk_space_btn = self._make_button(
+            "Disk Space", "utility",
+            "Show free space on /tmp (where swupdate extracts SWU artifacts) on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.disk_space_btn.clicked.connect(self._check_disk_space)
+
         self.stop_service_btn = self._make_button(
             "Stop matrix-api", "danger", "Stop the matrix-api service on selected rooms",
             icon=QStyle.SP_MediaStop,
@@ -1114,6 +1121,15 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.log_debug_btn.clicked.connect(self._set_log_debug)
 
+        self.add_trusted_endpoint_btn = self._make_button(
+            "Trust 192.168.1.68",
+            "service",
+            "Add 192.168.1.68 to apiServer.trustedEndPoints in "
+            "matrix.api.config.json and restart matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.add_trusted_endpoint_btn.clicked.connect(self._add_trusted_endpoint)
+
         services_box = self._button_group(
             "Services",
             [
@@ -1121,6 +1137,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.restart_nms_btn,
                 self.status_service_btn,
                 self.status_nms_btn,
+                self.disk_space_btn,
                 self.stop_service_btn,
                 self.stop_nms_btn,
                 self.reboot_btn,
@@ -1128,6 +1145,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.matrix_api_certs_btn,
                 self.fix_room_config_race_btn,
                 self.log_debug_btn,
+                self.add_trusted_endpoint_btn,
             ],
             columns=2,
         )
@@ -1756,6 +1774,7 @@ class MatrixDeployWindow(QMainWindow):
         bandwidth: Optional[str] = None,
         link_bandwidth_kbps: Optional[int] = None,
         logs_dir: Optional[Path] = None,
+        trusted_endpoint: Optional[str] = None,
         require_sudo: bool = True,
         confirm: bool = True,
     ) -> None:
@@ -1811,6 +1830,7 @@ class MatrixDeployWindow(QMainWindow):
             bandwidth=bandwidth,
             link_bandwidth_kbps=link_bandwidth_kbps,
             logs_dir=logs_dir,
+            trusted_endpoint=trusted_endpoint,
             sequential=sequential,
             max_concurrency=max_concurrency,
         )
@@ -1835,6 +1855,11 @@ class MatrixDeployWindow(QMainWindow):
             "nms_status", "Status: NMS", require_sudo=False, confirm=False
         )
 
+    def _check_disk_space(self) -> None:
+        self._run_system_action(
+            "check_disk_space", "Disk Space", require_sudo=False, confirm=False
+        )
+
     def _stop_service(self) -> None:
         self._run_system_action("stop_service", "Stop matrix-api")
 
@@ -1855,6 +1880,13 @@ class MatrixDeployWindow(QMainWindow):
 
     def _set_log_debug(self) -> None:
         self._run_system_action("set_log_debug", "Log Level: Debug")
+
+    def _add_trusted_endpoint(self) -> None:
+        self._run_system_action(
+            "add_trusted_endpoint",
+            "Trust 192.168.1.68",
+            trusted_endpoint="192.168.1.68",
+        )
 
     def _set_nms_bandwidth(self, bandwidth: str) -> None:
         self._run_system_action(

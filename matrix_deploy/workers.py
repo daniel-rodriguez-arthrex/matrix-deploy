@@ -46,6 +46,7 @@ class SystemActionWorker(QThread):
         bandwidth: Optional[str] = None,
         link_bandwidth_kbps: Optional[int] = None,
         logs_dir: Optional[Path] = None,
+        trusted_endpoint: Optional[str] = None,
         sequential: bool = True,
         max_concurrency: Optional[int] = None,
     ):
@@ -57,6 +58,7 @@ class SystemActionWorker(QThread):
         self.bandwidth = bandwidth
         self.link_bandwidth_kbps = link_bandwidth_kbps
         self.logs_dir = logs_dir
+        self.trusted_endpoint = trusted_endpoint
         self.sequential = sequential
         # Cap on simultaneously in-flight rooms when not forced sequential.
         # None means "no cap" (all selected rooms at once).
@@ -121,6 +123,10 @@ class SystemActionWorker(QThread):
                 ok = deployer.fix_room_config_race(room)
             elif self.action == "set_log_debug":
                 ok = deployer.set_log_level(room, "debug")
+            elif self.action == "add_trusted_endpoint":
+                ok = deployer.add_trusted_endpoint(room, self.trusted_endpoint)
+            elif self.action == "check_disk_space":
+                ok = deployer.check_disk_space(room)
             else:
                 self.log.emit(f"Unknown action: {self.action}", "error")
         except Exception as exc:  # noqa: BLE001 - never let a thread die silently

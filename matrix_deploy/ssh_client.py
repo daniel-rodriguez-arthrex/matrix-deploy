@@ -174,6 +174,31 @@ def upload_file(
         )
 
 
+def get_disk_free_kb(client: paramiko.SSHClient, path: str = "/tmp") -> Optional[int]:
+    """Return available space (in KiB) on the filesystem containing ``path``.
+
+    Runs ``df -Pk <path>`` (POSIX output format, so column layout is stable
+    across BusyBox/coreutils) and parses the "Available" column from the
+    second line. Returns ``None`` if the command fails or output can't be
+    parsed.
+    """
+    stdin, stdout, stderr = client.exec_command(f"df -Pk {path}")
+    output = stdout.read().decode(errors="replace").strip()
+    exit_status = stdout.channel.recv_exit_status()
+    if exit_status != 0 or not output:
+        return None
+    lines = output.splitlines()
+    if len(lines) < 2:
+        return None
+    fields = lines[-1].split()
+    if len(fields) < 4:
+        return None
+    try:
+        return int(fields[3])
+    except ValueError:
+        return None
+
+
 def port_is_open(host: str, port: int, timeout: float = 2.0) -> bool:
     """Return True if a TCP connection to host:port succeeds."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
