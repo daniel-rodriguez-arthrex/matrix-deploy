@@ -1168,17 +1168,18 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.add_trusted_endpoint_btn.clicked.connect(self._add_trusted_endpoint)
 
-        self.sync_trusted_origins_btn = self._make_button(
-            "Sync Trusted Origins",
+        self.web_app_config_btn = self._make_button(
+            "Web App Configuration",
             "service",
             "Add every room's externally-reachable API origin (https://<router "
             "ip>:1000N, computed from the loaded config) to apiServer."
-            "trustedEndPoints and restart matrix-api on selected rooms. Fixes "
-            "403s on module scripts when a room is reached through the "
-            "router's forwarded port.",
+            "trustedEndPoints AND set apiServer.helpFolder/appFolder/"
+            "supportBundlePath/masterPairKey to the correct values, then "
+            "restart matrix-api on selected rooms. Applied together - "
+            "neither half is useful without the other.",
             icon=QStyle.SP_FileDialogDetailedView,
         )
-        self.sync_trusted_origins_btn.clicked.connect(self._sync_trusted_origins)
+        self.web_app_config_btn.clicked.connect(self._configure_web_app)
 
         services_box = self._button_group(
             "Services",
@@ -1191,7 +1192,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.shutdown_btn,
                 self.log_debug_btn,
                 self.add_trusted_endpoint_btn,
-                self.sync_trusted_origins_btn,
+                self.web_app_config_btn,
             ],
             columns=2,
         )
@@ -2067,8 +2068,8 @@ class MatrixDeployWindow(QMainWindow):
             trusted_endpoint="192.168.1.68",
         )
 
-    def _sync_trusted_origins(self) -> None:
-        self._run_system_action("sync_trusted_origins", "Sync Trusted Origins")
+    def _configure_web_app(self) -> None:
+        self._run_system_action("configure_web_app", "Web App Configuration")
 
     def _set_nms_bandwidth(self, bandwidth: str) -> None:
         self._run_system_action(

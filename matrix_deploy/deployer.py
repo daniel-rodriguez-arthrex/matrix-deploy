@@ -983,6 +983,64 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def _read_remote_matrix_config(
+        self, client: paramiko.SSHClient
+    ) -> Optional[dict]:
+        """Read and JSON-parse the room's matrix.api.config.json off the
+        already-connected ``client``. Returns ``None`` (after logging the
+        reason) on any failure."""
+        conn = self.config.connection
+        self.log("Reading current matrix.api.config.json...", "detail")
+        prefix = self._read_sudo_prefix()
+        cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
+        collected: List[str] = []
+        exit_status = run_command(
+            client, cmd, get_pty=True, on_line=collected.append
+        )
+        if exit_status != 0:
+            self.log("Failed to read config file.", "error")
+            return None
+
+        raw = "\n".join(collected)
+        if not raw.strip():
+            self.log(
+                "Config file read returned no output (permission denied, "
+                "empty file, or a dropped SSH session are the usual causes).",
+                "error",
+            )
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as exc:
+            self.log(f"Could not parse remote config as JSON: {exc}", "error")
+            preview = raw if len(raw) <= 500 else raw[:500] + "... (truncated)"
+            self.log(f"Raw output was: {preview!r}", "detail")
+            return None
+
+    def _upload_and_apply_matrix_config(
+        self, client: paramiko.SSHClient, room: Room, data: dict, tmp_name: str
+    ) -> bool:
+        """Write ``data`` to a local temp file, upload it to the room, and
+        apply it + restart matrix-api. Does not advance/begin milestones -
+        callers own their own step accounting."""
+        conn = self.config.connection
+        local_tmp = Path(tempfile.gettempdir()) / tmp_name
+        local_tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+        remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
+        self.log("Uploading updated config...", "detail")
+        try:
+            upload_file(client, str(local_tmp), remote_staging)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Config upload failed: {exc}", "error")
+            return False
+
+        self.log("Applying config and restarting matrix-api...", "detail")
+        if not self._apply_config_and_restart_service(client, room):
+            self.log("Config apply failed (service restart failed).", "error")
+            return False
+        return True
+
     def _merge_trusted_endpoints(
         self, room: Room, endpoints: List[str], context: str
     ) -> bool:
@@ -995,7 +1053,6 @@ class Deployer:
         restarts) if every endpoint is already trusted. ``context`` is used
         only for logging (e.g. "trusted endpoint 'x'" or "interop origins").
         """
-        conn = self.config.connection
         self.log(f"=== OR {room.number}: Adding {context} ===", "info")
         try:
             client = connect(self._target(room))
@@ -1006,36 +1063,12 @@ class Deployer:
         try:
             self._begin(3)
 
-            # 1. Read the current config off the room.
-            self.log("Reading current matrix.api.config.json...", "detail")
-            prefix = self._read_sudo_prefix()
-            cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
-            collected: List[str] = []
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=collected.append
-            )
-            if exit_status != 0:
-                self.log("Failed to read config file.", "error")
-                return False
-
-            raw = "\n".join(collected)
-            if not raw.strip():
-                self.log(
-                    "Config file read returned no output (permission denied, "
-                    "empty file, or a dropped SSH session are the usual causes).",
-                    "error",
-                )
-                return False
-            try:
-                data = json.loads(raw)
-            except json.JSONDecodeError as exc:
-                self.log(f"Could not parse remote config as JSON: {exc}", "error")
-                preview = raw if len(raw) <= 500 else raw[:500] + "... (truncated)"
-                self.log(f"Raw output was: {preview!r}", "detail")
+            data = self._read_remote_matrix_config(client)
+            if data is None:
                 return False
             self._advance()  # read
 
-            # 2. Merge endpoints into apiServer.trustedEndPoints in place.
+            # Merge endpoints into apiServer.trustedEndPoints in place.
             api_server = data.setdefault("apiServer", {})
             trusted = api_server.setdefault("trustedEndPoints", [])
             if not isinstance(trusted, list):
@@ -1048,31 +1081,17 @@ class Deployer:
             else:
                 self.log("All endpoints already trusted.", "detail")
 
-            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-trustedendpoints.json"
-            local_tmp.write_text(
-                json.dumps(data, indent=2) + "\n", encoding="utf-8"
-            )
-
-            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
-            self.log("Uploading updated config...", "detail")
-            try:
-                upload_file(client, str(local_tmp), remote_staging)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"Config upload failed: {exc}", "error")
+            if not self._upload_and_apply_matrix_config(
+                client, room, data, f"or{room.number}-trustedendpoints.json"
+            ):
                 return False
-            self._advance()  # uploaded
-
-            # 3. Apply and restart matrix-api.
-            self.log("Applying config and restarting matrix-api...", "detail")
-            if not self._apply_config_and_restart_service(client, room):
-                self.log("Config apply failed (service restart failed).", "error")
-                return False
+            self._advance()  # uploaded/applied
 
             self.log(
                 f"OR {room.number}: trustedEndPoints updated and matrix-api restarted.",
                 "success",
             )
-            self._advance()  # applied
+            self._advance()
             return True
         finally:
             try:
@@ -1085,19 +1104,89 @@ class Deployer:
         restart matrix-api. See ``_merge_trusted_endpoints`` for details."""
         return self._merge_trusted_endpoints(room, [endpoint], f"trusted endpoint '{endpoint}'")
 
-    def sync_interop_trusted_origins(self, room: Room) -> bool:
-        """Compute every room's externally-reachable API origin (through the
-        router's forwarded port, e.g. ``https://<router_ip>:1000N``) from the
-        loaded config and merge them into apiServer.trustedEndPoints.
+    # Static apiServer fields that must point at the web app's actual
+    # installed dist/support-dump locations, plus the pairing key. Same
+    # value on every room.
+    WEB_APP_CONFIG_FIELDS = {
+        "helpFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
+        "appFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
+        "supportBundlePath": "/temp/supportDump",
+        "masterPairKey": "1234",
+    }
 
-        This is the origin a browser sends when reaching a room through the
-        router; without it present verbatim, module script requests 403.
-        Fixes already-deployed appliances generated before this URL set was
-        included automatically in ``config_builder.build_room_config``.
+    def configure_web_app(self, room: Room) -> bool:
+        """One-shot web app setup: merges every room's externally-reachable
+        API origin into apiServer.trustedEndPoints AND points
+        apiServer.helpFolder/appFolder/supportBundlePath at the correct
+        locations plus sets apiServer.masterPairKey, in a single
+        read/upload/restart cycle.
+
+        Neither half is useful on its own - the trusted origin lets a
+        browser reach the API through the router's forwarded port without a
+        403, and the folder paths are what that API then serves - so both
+        are always applied together instead of as two separate actions.
+        Every other existing field in the config is preserved as-is.
         """
-        router_ip = self.config.connection.router_ip
-        endpoints = [r.external_api_url(router_ip) for r in self.config.rooms]
-        return self._merge_trusted_endpoints(room, endpoints, "interop trusted origins")
+        self.log(f"=== OR {room.number}: Web App Configuration ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+
+        try:
+            self._begin(3)
+
+            data = self._read_remote_matrix_config(client)
+            if data is None:
+                return False
+            self._advance()  # read
+
+            api_server = data.setdefault("apiServer", {})
+
+            # 1. Trusted origins - every room's externally-reachable API URL.
+            router_ip = self.config.connection.router_ip
+            endpoints = [r.external_api_url(router_ip) for r in self.config.rooms]
+            trusted = api_server.setdefault("trustedEndPoints", [])
+            if not isinstance(trusted, list):
+                self.log("apiServer.trustedEndPoints is not a list; aborting.", "error")
+                return False
+            added = [e for e in endpoints if e not in trusted]
+            trusted.extend(added)
+            if added:
+                self.log(f"Adding trusted origins: {', '.join(added)}", "detail")
+            else:
+                self.log("All trusted origins already present.", "detail")
+
+            # 2. Web app dist/support-dump paths.
+            changed = []
+            for key, value in self.WEB_APP_CONFIG_FIELDS.items():
+                old = api_server.get(key)
+                if old != value:
+                    changed.append(f"{key}: {old!r} -> {value!r}")
+                api_server[key] = value
+            if changed:
+                self.log("Updating: " + "; ".join(changed), "detail")
+            else:
+                self.log("Web app paths already set to the desired values.", "detail")
+
+            if not self._upload_and_apply_matrix_config(
+                client, room, data, f"or{room.number}-webappconfig.json"
+            ):
+                return False
+            self._advance()  # uploaded/applied
+
+            self.log(
+                f"OR {room.number}: web app configuration updated and matrix-api restarted.",
+                "success",
+            )
+            self._advance()
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def reboot(self, room: Room) -> bool:
         """Connect to a room, trigger a reboot, and wait for it to come back."""

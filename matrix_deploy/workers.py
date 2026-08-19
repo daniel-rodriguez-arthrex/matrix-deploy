@@ -144,8 +144,8 @@ class SystemActionWorker(QThread):
                 ok = deployer.set_log_level(room, "debug")
             elif self.action == "add_trusted_endpoint":
                 ok = deployer.add_trusted_endpoint(room, self.trusted_endpoint)
-            elif self.action == "sync_trusted_origins":
-                ok = deployer.sync_interop_trusted_origins(room)
+            elif self.action == "configure_web_app":
+                ok = deployer.configure_web_app(room)
             elif self.action == "check_disk_space":
                 ok = deployer.check_disk_space(room)
             elif self.action == "check_uptime":
