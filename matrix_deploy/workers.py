@@ -14,12 +14,27 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from .artifactory import ArtifactoryClient, ArtifactoryCredentials, ArtifactoryError
 from .config import AppConfig, Room
 from .deployer import DeploymentCredentials, DeploymentRequest, Deployer
-from .jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
+from .jenkins import (
+    JENKINS_JOB,
+    JenkinsClient,
+    JenkinsCredentials,
+    JenkinsError,
+    JenkinsLoginRequiredError,
+)
 from .ssh_client import SSHError, SSHTarget, connect
 
 # Actions that mutate a single shared *local* resource (e.g. ~/.ssh/known_hosts)
 # and therefore must never run concurrently across rooms.
 _LOCAL_SERIAL_ACTIONS = {"remove_fingerprint"}
+
+# All rooms are reached through the same router (different forwarded SSH
+# ports), so their SWU uploads share one physical uplink even though the
+# rooms themselves are independent devices. Running several multi-GB SWU
+# uploads at once has been observed to starve/reset the slower connections
+# (empty-message socket/EOF errors) while the "winning" transfer finishes
+# fine. Cap simultaneous SWU uploads independently of overall room
+# concurrency so connect/install/reboot phases can still overlap.
+MAX_CONCURRENT_SWU_UPLOADS = 1
 
 
 class SystemActionWorker(QThread):
@@ -47,6 +62,8 @@ class SystemActionWorker(QThread):
         link_bandwidth_kbps: Optional[int] = None,
         logs_dir: Optional[Path] = None,
         trusted_endpoint: Optional[str] = None,
+        custom_command: Optional[str] = None,
+        use_sudo: bool = False,
         sequential: bool = True,
         max_concurrency: Optional[int] = None,
     ):
@@ -59,6 +76,8 @@ class SystemActionWorker(QThread):
         self.link_bandwidth_kbps = link_bandwidth_kbps
         self.logs_dir = logs_dir
         self.trusted_endpoint = trusted_endpoint
+        self.custom_command = custom_command
+        self.use_sudo = use_sudo
         self.sequential = sequential
         # Cap on simultaneously in-flight rooms when not forced sequential.
         # None means "no cap" (all selected rooms at once).
@@ -125,8 +144,18 @@ class SystemActionWorker(QThread):
                 ok = deployer.set_log_level(room, "debug")
             elif self.action == "add_trusted_endpoint":
                 ok = deployer.add_trusted_endpoint(room, self.trusted_endpoint)
+            elif self.action == "sync_trusted_origins":
+                ok = deployer.sync_interop_trusted_origins(room)
             elif self.action == "check_disk_space":
                 ok = deployer.check_disk_space(room)
+            elif self.action == "check_uptime":
+                ok = deployer.check_uptime(room)
+            elif self.action == "check_specs":
+                ok = deployer.check_specs(room)
+            elif self.action == "run_command":
+                ok = deployer.run_custom_command(
+                    room, self.custom_command or "", self.use_sudo
+                )
             else:
                 self.log.emit(f"Unknown action: {self.action}", "error")
         except Exception as exc:  # noqa: BLE001 - never let a thread die silently
@@ -242,6 +271,7 @@ class BuildTriggerWorker(QThread):
 
     log = pyqtSignal(str, str)                # message, level
     finished_ok = pyqtSignal(bool, str, str)   # success, message, build_url ("" if unknown)
+    login_required = pyqtSignal()             # Jenkins redirected to its login/Okta SSO page
 
     def __init__(self, creds: JenkinsCredentials, job_name: str = JENKINS_JOB):
         super().__init__()
@@ -263,6 +293,15 @@ class BuildTriggerWorker(QThread):
             else:
                 message = f"'{self.job_name}' triggered (build number not yet known)."
             self.finished_ok.emit(True, message, result.build_url or "")
+        except JenkinsLoginRequiredError as exc:
+            self.log.emit(str(exc), "error")
+            self.log.emit(
+                "Opening Jenkins in your browser - log in via Okta, then click "
+                "'Build New' again.",
+                "warning",
+            )
+            self.login_required.emit()
+            self.finished_ok.emit(False, str(exc), "")
         except JenkinsError as exc:
             self.log.emit(str(exc), "error")
             self.finished_ok.emit(False, str(exc), "")
@@ -411,6 +450,12 @@ class DeploymentWorker(QThread):
         # None means "no cap" (all selected rooms at once).
         self.max_concurrency = max_concurrency
         self._cancel = threading.Event()
+        # Shared across all rooms in this run so SWU uploads are throttled
+        # independently of overall room concurrency (see
+        # MAX_CONCURRENT_SWU_UPLOADS above).
+        self._swu_upload_semaphore = (
+            threading.Semaphore(MAX_CONCURRENT_SWU_UPLOADS) if do_swu else None
+        )
 
     def cancel(self) -> None:
         self._cancel.set()
@@ -431,6 +476,7 @@ class DeploymentWorker(QThread):
             progress=lambda sent, total: self.progress.emit(sent, total),
             is_cancelled=self._cancel.is_set,
             milestone=milestone,
+            swu_upload_semaphore=self._swu_upload_semaphore,
         )
 
         self.room_status.emit(room.number, "running")

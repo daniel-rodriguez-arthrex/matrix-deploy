@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,7 @@ class Deployer:
         progress: Progress,
         is_cancelled: Callable[[], bool],
         milestone: Optional[Milestone] = None,
+        swu_upload_semaphore: Optional[threading.Semaphore] = None,
     ):
         self.config = config
         self.creds = creds
@@ -69,6 +71,15 @@ class Deployer:
         self.progress = progress
         self.is_cancelled = is_cancelled
         self.milestone = milestone or (lambda done, total: None)
+        # Rooms are reached through forwarded ports on the *same* router, so
+        # their SWU uploads share one physical uplink. Running several
+        # multi-GB uploads at once can starve/reset the slower connections
+        # (empty-message socket/EOF errors) even though the rooms themselves
+        # are independent devices. This semaphore, when provided, caps how
+        # many SWU uploads are in flight at once regardless of overall room
+        # concurrency, while still letting connect/install/reboot phases run
+        # concurrently.
+        self.swu_upload_semaphore = swu_upload_semaphore
         self._steps_done = 0
         self._steps_total = 1
 
@@ -322,6 +333,93 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def check_uptime(self, room: Room) -> bool:
+        """Connect to a room and report system uptime (time since last boot).
+
+        The box can now soft-reboot itself on a lockup/watchdog event
+        without ever dropping the SSH connection, so "can I still SSH in"
+        is no longer a reliable signal that the system is healthy -
+        ``uptime`` since the last boot is.
+        """
+        self.log(f"=== OR {room.number}: Uptime ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            collected: List[str] = []
+            run_command(client, "uptime", on_line=collected.append)
+            self._advance()
+            if not collected:
+                self.log("Could not retrieve uptime.", "error")
+                return False
+            for line in collected:
+                self.log(f"OR {room.number}: {line}", "detail")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def check_specs(self, room: Room) -> bool:
+        """Connect to a room and report basic hardware/OS specs: kernel/OS
+        version, CPU model/core count, memory, and root filesystem usage.
+
+        All sections are collected first and emitted as a single log call
+        so concurrent per-room output doesn't interleave line-by-line with
+        other rooms in the shared log/output panel.
+        """
+        self.log(f"=== OR {room.number}: Specs ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            sections = [
+                ("Kernel/OS", "uname -a"),
+                (
+                    "OS Release",
+                    "cat /etc/os-release 2>/dev/null || cat /etc/*release 2>/dev/null",
+                ),
+                (
+                    "CPU",
+                    "grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | sed 's/^[[:space:]]*//' "
+                    "|| lscpu 2>/dev/null | grep 'Model name' | cut -d: -f2 | sed 's/^[[:space:]]*//'",
+                ),
+                (
+                    "CPU cores",
+                    "nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo",
+                ),
+                (
+                    "Memory",
+                    "free -m 2>/dev/null || head -3 /proc/meminfo",
+                ),
+                ("Root filesystem", "df -h /"),
+            ]
+            out_lines: List[str] = []
+            for label, cmd in sections:
+                lines: List[str] = []
+                run_command(client, cmd, on_line=lines.append)
+                if lines:
+                    out_lines.append(f"OR {room.number}: --- {label} ---")
+                    out_lines.extend(f"OR {room.number}: {line}" for line in lines)
+            self._advance()
+            if not out_lines:
+                self.log("Could not retrieve specs.", "error")
+                return False
+            self.log("\n".join(out_lines), "detail")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def _deploy_swu(
         self, client: paramiko.SSHClient, room: Room, swu_file: Optional[Path]
     ) -> bool:
@@ -341,11 +439,48 @@ class Deployer:
             return False
 
         self.log(f"Uploading {swu_file.name}...", "detail")
-        try:
-            upload_file(client, str(swu_file), remote_path, self.progress, self.log)
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"Upload failed: {exc}", "error")
-            return False
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            if self.is_cancelled():
+                self.log("Cancelled before upload completed.", "warning")
+                return False
+
+            if self.swu_upload_semaphore is not None:
+                self.swu_upload_semaphore.acquire()
+            try:
+                # If a previous attempt's connection died mid-transfer, the
+                # control connection is dead too - reconnect before retrying.
+                transport = client.get_transport()
+                if transport is None or not transport.is_active():
+                    self.log("Reconnecting before upload retry...", "detail")
+                    client = connect(self._target(room))
+                upload_file(client, str(swu_file), remote_path, self.progress, self.log)
+                break
+            except Exception as exc:  # noqa: BLE001
+                # Exceptions raised when a connection is reset/dropped mid
+                # transfer (e.g. socket.timeout, EOFError) often have no
+                # message, so fall back to the exception type name.
+                detail = str(exc) or type(exc).__name__
+                if attempt >= max_attempts:
+                    self.log(
+                        f"Upload failed after {attempt} attempt(s): {detail}",
+                        "error",
+                    )
+                    return False
+                wait_s = 5 * attempt
+                self.log(
+                    f"Upload attempt {attempt} failed ({detail}); "
+                    f"retrying in {wait_s}s...",
+                    "warning",
+                )
+                try:
+                    run_command(client, f"rm -f {shlex.quote(remote_path)}")
+                except Exception:  # noqa: BLE001 - best effort cleanup
+                    pass
+                time.sleep(wait_s)
+            finally:
+                if self.swu_upload_semaphore is not None:
+                    self.swu_upload_semaphore.release()
         self.log("Upload complete.", "success")
         self._advance()  # SWU uploaded
 
@@ -642,6 +777,51 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
+    def run_custom_command(self, room: Room, command: str, use_sudo: bool = False) -> bool:
+        """Connect to a room and run an arbitrary, user-supplied shell command,
+        streaming its combined stdout/stderr to the log as a single block.
+
+        Intended for ad-hoc diagnostics that don't have a dedicated button
+        (e.g. ``journalctl``, ``dmesg``, ``rasdaemon``). Runs without a PTY so
+        pager-invoking commands (``journalctl`` without ``--no-pager``, etc.)
+        auto-detect a non-interactive stdout and print directly rather than
+        hanging waiting for interactive pager input.
+        """
+        command = command.strip()
+        if not command:
+            self.log("No command entered.", "error")
+            return False
+
+        self.log(f"=== OR {room.number}: Run command ===", "info")
+        self.log(f"OR {room.number}: $ {command}", "detail")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            full_cmd = f"{self._sudo_prefix()} {command}" if use_sudo else command
+            out_lines: List[str] = []
+            exit_status = run_command(client, full_cmd, on_line=out_lines.append)
+            self._advance()
+            if out_lines:
+                self.log(
+                    "\n".join(f"OR {room.number}: {line}" for line in out_lines),
+                    "detail",
+                )
+            if exit_status != 0:
+                self.log(
+                    f"OR {room.number}: command exited with status {exit_status}",
+                    "warning",
+                )
+            return exit_status == 0
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def fetch_nms_password(self, room: Room) -> Optional[str]:
         """Connect to a room and return the parsed ``barco_nms_password``
         (the default NMS/admin login password), or ``None`` on failure."""
@@ -803,19 +983,20 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def add_trusted_endpoint(self, room: Room, endpoint: str) -> bool:
-        """Read the room's matrix.api.config.json, add ``endpoint`` to
-        ``apiServer.trustedEndPoints`` if not already present, push it back,
-        and restart matrix-api so the change takes effect.
+    def _merge_trusted_endpoints(
+        self, room: Room, endpoints: List[str], context: str
+    ) -> bool:
+        """Read the room's matrix.api.config.json, merge ``endpoints`` into
+        ``apiServer.trustedEndPoints`` (skipping any already present), push it
+        back, and restart matrix-api so the change takes effect.
 
         Only ``apiServer.trustedEndPoints`` is touched; every other field in
         the existing config is preserved exactly as-is. No-op (still
-        restarts) if the endpoint is already trusted.
+        restarts) if every endpoint is already trusted. ``context`` is used
+        only for logging (e.g. "trusted endpoint 'x'" or "interop origins").
         """
         conn = self.config.connection
-        self.log(
-            f"=== OR {room.number}: Adding trusted endpoint '{endpoint}' ===", "info"
-        )
+        self.log(f"=== OR {room.number}: Adding {context} ===", "info")
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -854,18 +1035,20 @@ class Deployer:
                 return False
             self._advance()  # read
 
-            # 2. Add the endpoint to apiServer.trustedEndPoints in place.
+            # 2. Merge endpoints into apiServer.trustedEndPoints in place.
             api_server = data.setdefault("apiServer", {})
             trusted = api_server.setdefault("trustedEndPoints", [])
             if not isinstance(trusted, list):
                 self.log("apiServer.trustedEndPoints is not a list; aborting.", "error")
                 return False
-            if endpoint in trusted:
-                self.log(f"'{endpoint}' is already trusted.", "detail")
+            added = [e for e in endpoints if e not in trusted]
+            trusted.extend(added)
+            if added:
+                self.log(f"Adding: {', '.join(added)}", "detail")
             else:
-                trusted.append(endpoint)
+                self.log("All endpoints already trusted.", "detail")
 
-            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-trustedendpoint.json"
+            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-trustedendpoints.json"
             local_tmp.write_text(
                 json.dumps(data, indent=2) + "\n", encoding="utf-8"
             )
@@ -886,7 +1069,7 @@ class Deployer:
                 return False
 
             self.log(
-                f"OR {room.number}: '{endpoint}' trusted and matrix-api restarted.",
+                f"OR {room.number}: trustedEndPoints updated and matrix-api restarted.",
                 "success",
             )
             self._advance()  # applied
@@ -896,6 +1079,25 @@ class Deployer:
                 client.close()
             except Exception:  # noqa: BLE001
                 pass
+
+    def add_trusted_endpoint(self, room: Room, endpoint: str) -> bool:
+        """Add a single ad-hoc endpoint to apiServer.trustedEndPoints and
+        restart matrix-api. See ``_merge_trusted_endpoints`` for details."""
+        return self._merge_trusted_endpoints(room, [endpoint], f"trusted endpoint '{endpoint}'")
+
+    def sync_interop_trusted_origins(self, room: Room) -> bool:
+        """Compute every room's externally-reachable API origin (through the
+        router's forwarded port, e.g. ``https://<router_ip>:1000N``) from the
+        loaded config and merge them into apiServer.trustedEndPoints.
+
+        This is the origin a browser sends when reaching a room through the
+        router; without it present verbatim, module script requests 403.
+        Fixes already-deployed appliances generated before this URL set was
+        included automatically in ``config_builder.build_room_config``.
+        """
+        router_ip = self.config.connection.router_ip
+        endpoints = [r.external_api_url(router_ip) for r in self.config.rooms]
+        return self._merge_trusted_endpoints(room, endpoints, "interop trusted origins")
 
     def reboot(self, room: Room) -> bool:
         """Connect to a room, trigger a reboot, and wait for it to come back."""

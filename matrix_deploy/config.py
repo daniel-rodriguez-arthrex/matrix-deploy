@@ -24,6 +24,17 @@ class Room:
         """Inter-operating-room API URL based on room number."""
         return f"https://localhost:{10000 + self.number}"
 
+    def external_api_url(self, router_ip: str) -> str:
+        """Externally-reachable API URL through the router's forwarded port.
+
+        Same port scheme as ``api_url`` (10000 + room number) but with the
+        router's IP instead of ``localhost``. This is the ``Origin`` a
+        browser sends when reaching the room through the router, and must
+        appear verbatim (protocol + host + port) in
+        ``apiServer.trustedEndPoints`` or module script requests 403.
+        """
+        return f"https://{router_ip}:{10000 + self.number}"
+
     def nms_url(self) -> str:
         return f"https://{self.room_id}:8443"
 

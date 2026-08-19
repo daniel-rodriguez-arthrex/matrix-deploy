@@ -6,6 +6,7 @@ threads and the Qt-free service modules.
 
 from __future__ import annotations
 
+import html
 import json
 import re
 import tempfile
@@ -48,7 +49,7 @@ from .config import AppConfig, Room
 from .deployer import DeploymentCredentials
 from .env_settings import load_env_secrets, load_env_settings
 from .faq_content import FAQ_SECTIONS
-from .jenkins import JenkinsCredentials
+from .jenkins import JENKINS_URL, JenkinsCredentials
 from .workers import (
     BuildTriggerWorker,
     DeploymentWorker,
@@ -67,8 +68,34 @@ LEVEL_COLORS = {
     "success": "#51cf66",
     "warning": "#ffd43b",
     "info": "#22b8cf",
-    "detail": "#868e96",
+    "detail": "#d4d4d4",
 }
+
+# Content-based coloring for "detail"-level output (raw command output from
+# check_uptime/check_specs/check_disk_space/run_custom_command etc.), so
+# plain command output reads like a normal colorized terminal instead of one
+# flat gray block, without needing to parse real ANSI escape codes (which
+# most non-interactive/non-pty commands don't emit anyway).
+_LINE_COLOR_RULES = [
+    (re.compile(r"\b(error|errors|fail|failed|failure|fatal|critical)\b", re.I), "#ff6b6b"),
+    (re.compile(r"\bwarn(ing)?s?\b", re.I), "#ffd43b"),
+    # "active (running)" ends on ")" - a non-word char followed by another
+    # non-word char (space) - so a trailing \b would never match there.
+    # Keep it as its own phrase match, separate from the \b-bounded words.
+    (re.compile(r"active \(running\)", re.I), "#51cf66"),
+    (
+        re.compile(r"\b(success(ful)?|passed|healthy|available|complete)\b", re.I),
+        "#51cf66",
+    ),
+]
+
+
+def _line_color(line: str, default_color: str) -> str:
+    for pattern, color in _LINE_COLOR_RULES:
+        if pattern.search(line):
+            return color
+    return default_color
+
 
 # (label, max rooms in flight at once; None = all selected rooms at once)
 CONCURRENCY_OPTIONS: List[tuple] = [
@@ -405,12 +432,21 @@ def _make_console() -> QTextEdit:
 
 
 def _append_console(console: QTextEdit, message: str, level: str) -> None:
-    color = LEVEL_COLORS.get(level, "#d4d4d4")
+    base_color = LEVEL_COLORS.get(level, "#d4d4d4")
     stamp = time.strftime("%H:%M:%S")
-    console.append(
-        f'<span style="color:#5c6773;">[{stamp}]</span> '
-        f'<span style="color:{color};">{message}</span>'
-    )
+    if level == "detail":
+        # Raw command output (uptime/specs/disk space/custom commands): color
+        # each line by content (error/warning/success keywords) instead of
+        # one flat gray block, and render embedded "\n" as real line breaks
+        # rather than letting the HTML renderer collapse them.
+        rendered = "<br>".join(
+            f'<span style="color:{_line_color(line, base_color)};">'
+            f"{html.escape(line)}</span>"
+            for line in message.split("\n")
+        )
+    else:
+        rendered = f'<span style="color:{base_color};">{html.escape(message)}</span>'
+    console.append(f'<span style="color:#5c6773;">[{stamp}]</span> {rendered}')
     console.moveCursor(QTextCursor.End)
     console._raw_lines.append((stamp, message))
 
@@ -557,9 +593,10 @@ class MatrixDeployWindow(QMainWindow):
         # Window-level tabs keep each workflow uncluttered: the everyday
         # Deploy flow, one-time Settings/credentials, and a searchable FAQ.
         self.top_tabs = QTabWidget()
-        self.top_tabs.addTab(self._build_deploy_tab(), "Deploy")
         self.top_tabs.addTab(self._build_settings_tab(), "Settings")
+        deploy_index = self.top_tabs.addTab(self._build_deploy_tab(), "Deploy")
         self.top_tabs.addTab(self._build_faq_tab(), "FAQ")
+        self.top_tabs.setCurrentIndex(deploy_index)
         root.addWidget(self.top_tabs)
 
     def _build_deploy_tab(self) -> QWidget:
@@ -580,6 +617,7 @@ class MatrixDeployWindow(QMainWindow):
         controls_layout.addLayout(self._build_options_row())
         controls_layout.addLayout(self._build_action_row())
         controls_layout.addLayout(self._build_controls_row())
+        controls_layout.addWidget(self._build_custom_command_bar())
 
         # Operating rooms and output sit side by side, user-resizable.
         bottom_split = QSplitter(Qt.Horizontal)
@@ -755,6 +793,17 @@ class MatrixDeployWindow(QMainWindow):
         btn.toggled.connect(_toggle)
         return btn
 
+    @staticmethod
+    def _link_label(url: str, text: str, tooltip: str = "") -> QLabel:
+        """A small clickable hyperlink label that opens ``url`` in the
+        system's default browser."""
+        label = QLabel(f'<a href="{url}">{text}</a>')
+        label.setOpenExternalLinks(True)
+        label.setCursor(Qt.PointingHandCursor)
+        if tooltip:
+            label.setToolTip(tooltip)
+        return label
+
     def _build_connection_group(self) -> QGroupBox:
         group = QGroupBox("Connection Settings")
         layout = QGridLayout()
@@ -796,6 +845,15 @@ class MatrixDeployWindow(QMainWindow):
         self.artifactory_token_input.setPlaceholderText("API token (not saved to disk)")
         layout.addWidget(self.artifactory_token_input, 5, 1)
         layout.addWidget(self._password_toggle(self.artifactory_token_input), 5, 2)
+        artifactory_base = self.config.artifactory.url.rsplit("/artifactory", 1)[0]
+        layout.addWidget(
+            self._link_label(
+                f"{artifactory_base}/ui/user_profile",
+                "Get token \u2192",
+                "Log in, then Edit Profile \u2192 Generate an Identity Token",
+            ),
+            5, 3,
+        )
 
         layout.addWidget(QLabel("Jenkins Username:"), 6, 0)
         self.jenkins_username_input = QLineEdit()
@@ -803,6 +861,14 @@ class MatrixDeployWindow(QMainWindow):
             "Jenkins login ID, e.g. 'Daniel Rodriguez' (not your email)"
         )
         layout.addWidget(self.jenkins_username_input, 6, 1)
+        layout.addWidget(
+            self._link_label(
+                f"{JENKINS_URL}/me/",
+                "Find username \u2192",
+                "Your login ID is shown on your Jenkins profile page",
+            ),
+            6, 3,
+        )
 
         layout.addWidget(QLabel("Jenkins Token:"), 7, 0)
         self.jenkins_token_input = QLineEdit()
@@ -841,7 +907,9 @@ class MatrixDeployWindow(QMainWindow):
         self.build_btn = self._make_button(
             "Build New",
             "service",
-            tooltip="Trigger a new 'Embedded Builder' Jenkins build (matrix / wrynose).",
+            tooltip="Trigger a new 'Embedded Builder' Jenkins build (matrix / wrynose). "
+            "If Jenkins requires an active Okta session, a browser tab opens "
+            "automatically - log in there, then click this again.",
             icon=QStyle.SP_BrowserReload,
         )
         self.build_btn.clicked.connect(self._trigger_build)
@@ -1008,13 +1076,20 @@ class MatrixDeployWindow(QMainWindow):
 
     @staticmethod
     def _button_group(
-        title: str, buttons: List[QPushButton], columns: int = 2
+        title: str,
+        buttons: List[QPushButton],
+        columns: int = 2,
+        pack_top: bool = False,
     ) -> QGroupBox:
         """Wrap a set of related buttons in a titled, collapsible frame
         (inherits global QGroupBox styling). Buttons are laid out in a grid
         that wraps every ``columns`` items, so groups with many actions (e.g.
         Services) breathe instead of being crammed into one row. Click the
-        checkbox in the title to collapse/expand the group."""
+        checkbox in the title to collapse/expand the group.
+
+        ``pack_top`` keeps the buttons packed at the top of the frame (spare
+        vertical space collects below them) so short groups don't have their
+        few buttons stretched apart to match taller neighbours in the row."""
         box = QGroupBox(title)
         box.setCheckable(True)
         box.setChecked(True)
@@ -1027,6 +1102,9 @@ class MatrixDeployWindow(QMainWindow):
             grid.addWidget(btn, i // columns, i % columns)
         for col in range(columns):
             grid.setColumnStretch(col, 1)
+        if pack_top:
+            rows_used = (len(buttons) + columns - 1) // columns
+            grid.setRowStretch(rows_used, 1)
         box.setLayout(grid)
 
         def _toggle(checked: bool, _buttons=buttons) -> None:
@@ -1050,25 +1128,6 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.restart_nms_btn.clicked.connect(self._restart_nms_service)
 
-        self.status_service_btn = self._make_button(
-            "Status: matrix-api", "utility", "Show systemctl status for matrix-api on selected rooms",
-            icon=QStyle.SP_FileDialogDetailedView,
-        )
-        self.status_service_btn.clicked.connect(self._matrix_api_status)
-
-        self.status_nms_btn = self._make_button(
-            "Status: NMS", "utility", "Show systemctl status for barco-nms on selected rooms",
-            icon=QStyle.SP_FileDialogDetailedView,
-        )
-        self.status_nms_btn.clicked.connect(self._nms_status)
-
-        self.disk_space_btn = self._make_button(
-            "Disk Space", "utility",
-            "Show free space on /tmp (where swupdate extracts SWU artifacts) on selected rooms",
-            icon=QStyle.SP_FileDialogDetailedView,
-        )
-        self.disk_space_btn.clicked.connect(self._check_disk_space)
-
         self.stop_service_btn = self._make_button(
             "Stop matrix-api", "danger", "Stop the matrix-api service on selected rooms",
             icon=QStyle.SP_MediaStop,
@@ -1091,27 +1150,6 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.shutdown_btn.clicked.connect(self._shutdown)
 
-        self.matrix_api_certs_btn = self._make_button(
-            "matrix-api-certs",
-            "danger",
-            "Disable cert-init/unseal units, regenerate the self-signed "
-            "matrix-api server cert/key, fix ownership/permissions, and "
-            "restart matrix-api on selected rooms",
-            icon=QStyle.SP_FileDialogDetailedView,
-        )
-        self.matrix_api_certs_btn.clicked.connect(self._matrix_api_certs)
-
-        self.fix_room_config_race_btn = self._make_button(
-            "Fix IP Race Condition",
-            "service",
-            "Patch matrix-room-config-generator.service so it waits on "
-            "barco-nms-network-init.service before starting, fixing a race "
-            "where it could grab the wrong/stale IP address. Takes effect on "
-            "next reboot; safe to re-run.",
-            icon=QStyle.SP_BrowserReload,
-        )
-        self.fix_room_config_race_btn.clicked.connect(self._fix_room_config_race)
-
         self.log_debug_btn = self._make_button(
             "Log Level: Debug",
             "service",
@@ -1130,22 +1168,30 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.add_trusted_endpoint_btn.clicked.connect(self._add_trusted_endpoint)
 
+        self.sync_trusted_origins_btn = self._make_button(
+            "Sync Trusted Origins",
+            "service",
+            "Add every room's externally-reachable API origin (https://<router "
+            "ip>:1000N, computed from the loaded config) to apiServer."
+            "trustedEndPoints and restart matrix-api on selected rooms. Fixes "
+            "403s on module scripts when a room is reached through the "
+            "router's forwarded port.",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.sync_trusted_origins_btn.clicked.connect(self._sync_trusted_origins)
+
         services_box = self._button_group(
             "Services",
             [
                 self.restart_service_btn,
                 self.restart_nms_btn,
-                self.status_service_btn,
-                self.status_nms_btn,
-                self.disk_space_btn,
                 self.stop_service_btn,
                 self.stop_nms_btn,
                 self.reboot_btn,
                 self.shutdown_btn,
-                self.matrix_api_certs_btn,
-                self.fix_room_config_race_btn,
                 self.log_debug_btn,
                 self.add_trusted_endpoint_btn,
+                self.sync_trusted_origins_btn,
             ],
             columns=2,
         )
@@ -1200,6 +1246,42 @@ class MatrixDeployWindow(QMainWindow):
         )
 
         # --- Diagnostics (read-only) -------------------------------------
+        self.status_service_btn = self._make_button(
+            "Status: matrix-api", "utility", "Show systemctl status for matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.status_service_btn.clicked.connect(self._matrix_api_status)
+
+        self.status_nms_btn = self._make_button(
+            "Status: NMS", "utility", "Show systemctl status for barco-nms on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.status_nms_btn.clicked.connect(self._nms_status)
+
+        self.disk_space_btn = self._make_button(
+            "Disk Space", "utility",
+            "Show free space on /tmp (where swupdate extracts SWU artifacts) on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.disk_space_btn.clicked.connect(self._check_disk_space)
+
+        self.uptime_btn = self._make_button(
+            "Uptime", "utility",
+            "Show time since last reboot on selected rooms. Since a lockup can now "
+            "trigger a soft-reboot without dropping SSH, being able to SSH in is no "
+            "longer proof the system is healthy - check uptime instead.",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.uptime_btn.clicked.connect(self._check_uptime)
+
+        self.specs_btn = self._make_button(
+            "Specs", "utility",
+            "Show kernel/OS version, CPU cores, memory, and root filesystem usage "
+            "for selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.specs_btn.clicked.connect(self._check_specs)
+
         self.get_logs_btn = self._make_button(
             "Get Logs",
             "neutral",
@@ -1238,6 +1320,11 @@ class MatrixDeployWindow(QMainWindow):
         diagnostics_box = self._button_group(
             "Diagnostics",
             [
+                self.status_service_btn,
+                self.status_nms_btn,
+                self.disk_space_btn,
+                self.uptime_btn,
+                self.specs_btn,
                 self.get_logs_btn,
                 self.view_config_btn,
                 self.get_nms_password_btn,
@@ -1271,6 +1358,7 @@ class MatrixDeployWindow(QMainWindow):
             "Live Logs",
             [self.watch_matrix_api_btn, self.watch_nms_btn],
             columns=1,
+            pack_top=True,
         )
 
         # Each group now wraps its buttons into a 2-col grid, so stretch by
@@ -1284,6 +1372,57 @@ class MatrixDeployWindow(QMainWindow):
         row.addWidget(live_logs_box, stretch=1)
         row.setAlignment(Qt.AlignTop)
         return row
+
+    def _build_custom_command_bar(self) -> QGroupBox:
+        """Thin, full-width group for ad-hoc diagnostic commands - kept out of
+        the button-box row above so it doesn't get squeezed, but wrapped in the
+        same titled/collapsible frame as the other control groups so it matches
+        the rest of the layout."""
+        box = QGroupBox("Custom Command")
+        box.setCheckable(True)
+        box.setChecked(True)
+        box.setToolTip("Click to collapse/expand this group")
+
+        bar = QHBoxLayout()
+        bar.setContentsMargins(8, 6, 8, 8)
+        bar.setSpacing(8)
+
+        self.custom_command_input = QLineEdit()
+        self.custom_command_input.setPlaceholderText(
+            "e.g. journalctl -k --no-pager -n 200"
+        )
+        self.custom_command_input.setToolTip(
+            "Runs without a pty/pager, so add --no-pager / -n <lines> etc. as "
+            "needed - a pager left waiting for interactive input would hang."
+        )
+        self.custom_command_input.returnPressed.connect(self._run_custom_command)
+        bar.addWidget(self.custom_command_input, stretch=1)
+
+        self.custom_command_sudo_checkbox = QCheckBox("sudo")
+        self.custom_command_sudo_checkbox.setToolTip(
+            "Run the command with sudo (requires the sudo password field)."
+        )
+        bar.addWidget(self.custom_command_sudo_checkbox)
+
+        self.run_command_btn = self._make_button(
+            "Run",
+            "utility",
+            "Run this exact command on selected rooms and stream its output.",
+            icon=QStyle.SP_MediaPlay,
+        )
+        self.run_command_btn.setMaximumWidth(90)
+        self.run_command_btn.clicked.connect(self._run_custom_command)
+        bar.addWidget(self.run_command_btn)
+
+        box.setLayout(bar)
+
+        def _toggle(checked: bool) -> None:
+            self.custom_command_input.setVisible(checked)
+            self.custom_command_sudo_checkbox.setVisible(checked)
+            self.run_command_btn.setVisible(checked)
+
+        box.toggled.connect(_toggle)
+        return box
 
     def _build_terminal_group(self) -> QGroupBox:
         group = QGroupBox("Output")
@@ -1575,7 +1714,15 @@ class MatrixDeployWindow(QMainWindow):
         worker.finished_ok.connect(
             lambda ok, msg, url, _p=panel: self._trigger_build_finished(ok, msg, url, _p)
         )
+        worker.login_required.connect(self._on_jenkins_login_required)
         worker.start()
+
+    def _on_jenkins_login_required(self) -> None:
+        """Jenkins redirected the build request to its login/Okta SSO page -
+        the API token alone isn't enough right now. Open Jenkins in the
+        default browser so the user can log in, instead of leaving them to
+        guess why a valid-looking token keeps failing."""
+        webbrowser.open(JENKINS_URL)
 
     def _trigger_build_finished(
         self, success: bool, message: str, build_url: str, panel: _JobPanel
@@ -1775,6 +1922,8 @@ class MatrixDeployWindow(QMainWindow):
         link_bandwidth_kbps: Optional[int] = None,
         logs_dir: Optional[Path] = None,
         trusted_endpoint: Optional[str] = None,
+        custom_command: Optional[str] = None,
+        use_sudo: bool = False,
         require_sudo: bool = True,
         confirm: bool = True,
     ) -> None:
@@ -1831,6 +1980,8 @@ class MatrixDeployWindow(QMainWindow):
             link_bandwidth_kbps=link_bandwidth_kbps,
             logs_dir=logs_dir,
             trusted_endpoint=trusted_endpoint,
+            custom_command=custom_command,
+            use_sudo=use_sudo,
             sequential=sequential,
             max_concurrency=max_concurrency,
         )
@@ -1860,6 +2011,40 @@ class MatrixDeployWindow(QMainWindow):
             "check_disk_space", "Disk Space", require_sudo=False, confirm=False
         )
 
+    def _check_uptime(self) -> None:
+        self._run_system_action(
+            "check_uptime", "Uptime", require_sudo=False, confirm=False
+        )
+
+    def _check_specs(self) -> None:
+        self._run_system_action(
+            "check_specs", "Specs", require_sudo=False, confirm=False
+        )
+
+    def _run_custom_command(self) -> None:
+        command = self.custom_command_input.text().strip()
+        if not command:
+            QMessageBox.warning(self, "No Command", "Enter a command to run.")
+            return
+
+        use_sudo = self.custom_command_sudo_checkbox.isChecked()
+        if use_sudo and not self.sudo_password_input.text():
+            QMessageBox.warning(
+                self,
+                "Missing Sudo Password",
+                "Sudo password is required to run this command as sudo.",
+            )
+            return
+
+        self._run_system_action(
+            "run_command",
+            f"Run: {command}",
+            custom_command=command,
+            use_sudo=use_sudo,
+            require_sudo=False,
+            confirm=True,
+        )
+
     def _stop_service(self) -> None:
         self._run_system_action("stop_service", "Stop matrix-api")
 
@@ -1872,12 +2057,6 @@ class MatrixDeployWindow(QMainWindow):
     def _shutdown(self) -> None:
         self._run_system_action("shutdown", "Shutdown")
 
-    def _matrix_api_certs(self) -> None:
-        self._run_system_action("matrix_api_certs", "matrix-api-certs")
-
-    def _fix_room_config_race(self) -> None:
-        self._run_system_action("fix_room_config_race", "Fix IP Race Condition")
-
     def _set_log_debug(self) -> None:
         self._run_system_action("set_log_debug", "Log Level: Debug")
 
@@ -1887,6 +2066,9 @@ class MatrixDeployWindow(QMainWindow):
             "Trust 192.168.1.68",
             trusted_endpoint="192.168.1.68",
         )
+
+    def _sync_trusted_origins(self) -> None:
+        self._run_system_action("sync_trusted_origins", "Sync Trusted Origins")
 
     def _set_nms_bandwidth(self, bandwidth: str) -> None:
         self._run_system_action(
@@ -2014,7 +2196,7 @@ class MatrixDeployWindow(QMainWindow):
         missing = self._missing_critical()
         if not missing:
             return
-        self.top_tabs.setCurrentIndex(1)  # Settings tab
+        # Deploy stays the default tab on startup; just warn, don't switch.
         QMessageBox.information(
             self,
             "Configuration Needed",
@@ -2029,7 +2211,7 @@ class MatrixDeployWindow(QMainWindow):
         missing = self._missing_critical()
         if not missing:
             return True
-        self.top_tabs.setCurrentIndex(1)  # Settings tab
+        self.top_tabs.setCurrentIndex(0)  # Settings tab
         QMessageBox.warning(
             self,
             "Configuration Needed",

@@ -40,6 +40,24 @@ FAQ_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
                 "</ul>",
             ),
             (
+                "Where do I get my Artifactory and Jenkins tokens?",
+                "<ul>"
+                "<li><b>Artifactory:</b> log into "
+                "<code>https://artifactory.dev.actsw.net</code> with your "
+                "Arthrex SSO, open your user profile (top-right avatar &rarr; "
+                "<b>Edit Profile</b>), and generate an <b>Identity Token</b>. "
+                "Use your Arthrex email as the username.</li>"
+                "<li><b>Jenkins:</b> log into "
+                "<code>https://jenkins-embedded.dev.actsw.net</code>, click "
+                "your name (top-right) &rarr; <b>Configure</b>, then "
+                "<b>Add new Token</b> under API Token. Your <b>Jenkins "
+                "Username</b> is the login ID shown on that same profile page "
+                "- it's usually your full name, <b>not</b> your email.</li>"
+                "</ul>"
+                "Click the small \"Get token\"/\"Find username\" links next to "
+                "each field in Settings to jump straight there.",
+            ),
+            (
                 "Are my passwords and tokens saved to disk?",
                 "No. The app never writes the SSH password, sudo password, "
                 "Artifactory token, or Jenkins token to disk. Only non-secret "
@@ -80,31 +98,28 @@ FAQ_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
                 "<ul>"
                 "<li><b>Restart matrix-api</b> / <b>Restart NMS</b> - restart the "
                 "<code>matrix-api</code> / <code>barco-nms</code> service.</li>"
-                "<li><b>Status: matrix-api</b> / <b>Status: NMS</b> - show "
-                "<code>systemctl status</code> (read-only).</li>"
                 "<li><b>Stop matrix-api</b> / <b>Stop NMS</b> - stop the service.</li>"
                 "<li><b>Reboot</b> / <b>Shutdown</b> - reboot or power off the room.</li>"
                 "</ul>",
-            ),
-            (
-                "What does matrix-api-certs do?",
-                "Disables the cert-init/unseal units, regenerates the "
-                "self-signed matrix-api server cert/key, fixes ownership and "
-                "permissions, and restarts <code>matrix-api</code> on the "
-                "selected rooms.",
-            ),
-            (
-                "What does Fix IP Race Condition do?",
-                "Patches <code>matrix-room-config-generator.service</code> so it "
-                "waits on <code>barco-nms-network-init.service</code> before "
-                "starting, fixing a race where it could grab the wrong/stale IP "
-                "address. Takes effect on next reboot; safe to re-run.",
             ),
             (
                 "What does Log Level: Debug do?",
                 "Sets <code>logConfig.streams[].level</code> to <code>debug</code> "
                 "in <code>matrix.api.config.json</code> and restarts "
                 "<code>matrix-api</code> on the selected rooms.",
+            ),
+            (
+                "What do Trust 192.168.1.68 and Sync Trusted Origins do?",
+                "Both edit <code>apiServer.trustedEndPoints</code> in "
+                "<code>matrix.api.config.json</code> and restart "
+                "<code>matrix-api</code>, without touching any other field. "
+                "<b>Trust 192.168.1.68</b> adds that one specific host. "
+                "<b>Sync Trusted Origins</b> adds every room's externally-"
+                "reachable API origin (<code>https://&lt;router ip&gt;:1000N</code>, "
+                "computed from the loaded config) - use this to fix 403s on "
+                "module script requests when a room is reached through the "
+                "router's forwarded port. Both are safe to re-run (already-"
+                "trusted entries are skipped).",
             ),
         ],
     ),
@@ -135,6 +150,13 @@ FAQ_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
         "Diagnostics & Logs",
         [
             (
+                "What do Status: matrix-api / Status: NMS / Disk Space do?",
+                "<b>Status: matrix-api</b> / <b>Status: NMS</b> show "
+                "<code>systemctl status</code> for the service (read-only). "
+                "<b>Disk Space</b> shows free space on <code>/tmp</code>, where "
+                "swupdate extracts SWU artifacts before installing.",
+            ),
+            (
                 "Get Logs / View matrix.api.config?",
                 "<b>Get Logs</b> downloads matrix-api and barco-nms logs for the "
                 "selected rooms to your Downloads folder. <b>View "
@@ -164,6 +186,16 @@ FAQ_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
         "Troubleshooting",
         [
             (
+                "A room's web app / module scripts 403 through the router",
+                "The browser's <code>Origin</code> header "
+                "(<code>https://&lt;router ip&gt;:1000N</code>) isn't present in "
+                "<code>apiServer.trustedEndPoints</code>, so <code>applyTrustedCors</code> "
+                "rejects it. Click <b>Sync Trusted Origins</b> on the affected "
+                "room(s) to add every room's external origin and restart "
+                "<code>matrix-api</code>. Freshly generated configs already "
+                "include these automatically.",
+            ),
+            (
                 "\"REMOTE HOST IDENTIFICATION HAS CHANGED\" / host key errors",
                 "Click <b>Remove Fingerprint</b> for the affected rooms. It "
                 "removes the cached SSH host key from your local "
@@ -176,6 +208,16 @@ FAQ_SECTIONS: List[Tuple[str, List[Tuple[str, str]]]] = [
                 "\"Daniel Rodriguez\"), <b>not</b> your email. Check "
                 "<code>https://jenkins-embedded.dev.actsw.net</code> under your "
                 "account/profile if unsure, and make sure the Jenkins token is set.",
+            ),
+            (
+                "Build New keeps failing even with a correct token",
+                "Jenkins sometimes needs an <b>active logged-in browser session "
+                "via Okta</b>, on top of a valid API token - the token alone "
+                "isn't always enough. When this happens, the app detects the "
+                "login redirect and <b>automatically opens Jenkins in your "
+                "default browser</b> and logs a warning in the output. Log in "
+                "there (complete Okta/MFA), then click <b>Build New</b> again "
+                "- no need to keep clicking it repeatedly.",
             ),
             (
                 "A room says it's busy",

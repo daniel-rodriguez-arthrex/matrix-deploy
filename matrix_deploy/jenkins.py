@@ -47,6 +47,14 @@ class JenkinsError(Exception):
     """Raised when a Jenkins operation fails."""
 
 
+class JenkinsLoginRequiredError(JenkinsError):
+    """Raised when Jenkins redirected us to its login/Okta SSO flow instead
+    of accepting the API token - i.e. the token is fine but there's no
+    active logged-in browser session. Callers can catch this specifically
+    to prompt the user to log in via a browser rather than re-checking
+    credentials."""
+
+
 @dataclass
 class JenkinsCredentials:
     username: str
@@ -121,7 +129,7 @@ class JenkinsClient:
             if log is not None:
                 log(f"Redirected to: {location}", "detail")
             if _is_login_redirect(location):
-                raise JenkinsError(
+                raise JenkinsLoginRequiredError(
                     "Jenkins redirected this request to a login page instead of "
                     "accepting the token - the token is likely expired/revoked, "
                     "or this Jenkins requires an active logged-in browser session "
@@ -228,7 +236,7 @@ class JenkinsClient:
         if resp.status_code in (301, 302, 303, 307, 308) and _is_login_redirect(location):
             if log is not None:
                 log(f"Redirected to: {location}", "detail")
-            raise JenkinsError(
+            raise JenkinsLoginRequiredError(
                 "Jenkins redirected this request to a login page instead of "
                 "accepting the token - the token is likely expired/revoked, "
                 "or this Jenkins requires an active logged-in browser session "
