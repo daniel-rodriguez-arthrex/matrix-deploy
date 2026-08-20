@@ -1283,6 +1283,17 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.specs_btn.clicked.connect(self._check_specs)
 
+        self.system_errors_btn = self._make_button(
+            "System Errors (3h)", "utility",
+            "Show error/crit/alert/emerg messages from the last 3 hours on "
+            "selected rooms, split into Kernel (watchdog resets, driver "
+            "faults, hardware errors) and All services (matrix-api/"
+            "barco-nms crashes, failed units, etc.) so a hardware fault can "
+            "be correlated with whatever it triggered.",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.system_errors_btn.clicked.connect(self._check_system_errors)
+
         self.get_logs_btn = self._make_button(
             "Get Logs",
             "neutral",
@@ -1290,6 +1301,16 @@ class MatrixDeployWindow(QMainWindow):
             icon=QStyle.SP_DialogSaveButton,
         )
         self.get_logs_btn.clicked.connect(self._get_logs)
+
+        self.get_full_journal_btn = self._make_button(
+            "Get Full Journal",
+            "neutral",
+            "Download the complete, unfiltered journalctl output (every "
+            "unit/priority, no time window) for selected rooms to your "
+            "Downloads folder. Does not print it to the log terminal.",
+            icon=QStyle.SP_DialogSaveButton,
+        )
+        self.get_full_journal_btn.clicked.connect(self._get_full_journal)
 
         self.view_config_btn = self._make_button(
             "View matrix.api.config",
@@ -1326,7 +1347,9 @@ class MatrixDeployWindow(QMainWindow):
                 self.disk_space_btn,
                 self.uptime_btn,
                 self.specs_btn,
+                self.system_errors_btn,
                 self.get_logs_btn,
+                self.get_full_journal_btn,
                 self.view_config_btn,
                 self.get_nms_password_btn,
                 self.remove_fingerprint_btn,
@@ -2022,6 +2045,11 @@ class MatrixDeployWindow(QMainWindow):
             "check_specs", "Specs", require_sudo=False, confirm=False
         )
 
+    def _check_system_errors(self) -> None:
+        self._run_system_action(
+            "check_system_errors", "System Errors (3h)", require_sudo=False, confirm=False
+        )
+
     def _run_custom_command(self) -> None:
         command = self.custom_command_input.text().strip()
         if not command:
@@ -2090,6 +2118,15 @@ class MatrixDeployWindow(QMainWindow):
         self._run_system_action(
             "get_logs",
             "Get Logs",
+            logs_dir=DOWNLOADS_DIR,
+            require_sudo=False,
+            confirm=False,
+        )
+
+    def _get_full_journal(self) -> None:
+        self._run_system_action(
+            "get_full_journal",
+            "Get Full Journal",
             logs_dir=DOWNLOADS_DIR,
             require_sudo=False,
             confirm=False,

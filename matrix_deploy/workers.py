@@ -130,6 +130,8 @@ class SystemActionWorker(QThread):
                 ok = deployer.deploy_nms_remove_overlay(room)
             elif self.action == "get_logs":
                 ok = deployer.fetch_service_logs(room, self.logs_dir) is not None
+            elif self.action == "get_full_journal":
+                ok = deployer.fetch_full_journal(room, self.logs_dir) is not None
             elif self.action == "view_config":
                 ok = deployer.view_matrix_config(room, self.logs_dir)
             elif self.action == "get_nms_password":
@@ -152,6 +154,8 @@ class SystemActionWorker(QThread):
                 ok = deployer.check_uptime(room)
             elif self.action == "check_specs":
                 ok = deployer.check_specs(room)
+            elif self.action == "check_system_errors":
+                ok = deployer.check_system_errors(room)
             elif self.action == "run_command":
                 ok = deployer.run_custom_command(
                     room, self.custom_command or "", self.use_sudo

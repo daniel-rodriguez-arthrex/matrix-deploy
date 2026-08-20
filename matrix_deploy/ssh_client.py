@@ -174,6 +174,43 @@ def upload_file(
         )
 
 
+def download_file(
+    client: paramiko.SSHClient,
+    remote_path: str,
+    local_path: str,
+    progress: Optional[Progress] = None,
+    log: Optional[Logger] = None,
+) -> None:
+    """Download a file via SCP with an optional, rate-limited progress
+    callback. Mirrors ``upload_file``'s throttling/logging behavior."""
+    last_emit = 0.0
+
+    def _cb(filename, size, sent):  # noqa: ANN001 - paramiko/scp signature
+        nonlocal last_emit
+        if progress is None:
+            return
+        now = time.monotonic()
+        if sent >= size or now - last_emit >= 0.15:
+            last_emit = now
+            progress(sent, size)
+
+    start = time.monotonic()
+    with SCPClient(client.get_transport(), progress=_cb if progress else None) as scp:
+        scp.get(remote_path, local_path)
+    elapsed = time.monotonic() - start
+
+    if log is not None:
+        try:
+            size_mb = os.path.getsize(local_path) / (1024 * 1024)
+        except OSError:
+            size_mb = 0.0
+        rate = (size_mb / elapsed) if elapsed > 0 else 0.0
+        log(
+            f"Downloaded {size_mb:.1f} MB in {elapsed:.1f}s ({rate:.2f} MB/s).",
+            "detail",
+        )
+
+
 def get_disk_free_kb(client: paramiko.SSHClient, path: str = "/tmp") -> Optional[int]:
     """Return available space (in KiB) on the filesystem containing ``path``.
 

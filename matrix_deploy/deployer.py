@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -26,6 +27,7 @@ from .ssh_client import (
     SSHError,
     SSHTarget,
     connect,
+    download_file,
     get_disk_free_kb,
     run_command,
     upload_file,
@@ -771,6 +773,120 @@ class Deployer:
             dest.write_text(banner + "\n" + "\n\n".join(sections) + "\n", encoding="utf-8")
             self.log(f"Saved logs to {dest}", "success")
             return dest
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def fetch_full_journal(self, room: Room, dest_dir: Path) -> Optional[Path]:
+        """Download the complete systemd journal (unfiltered - every unit,
+        every priority, no time window) to a timestamped text file in
+        ``dest_dir``. Returns the file path on success; nothing is printed
+        to the log terminal besides progress/status.
+
+        The journal is dumped to a temp file on the room and pulled down
+        via SCP (with a progress callback) instead of being streamed
+        line-by-line through the SSH channel - for a large journal that is
+        both much faster and gives real transfer progress instead of an
+        indefinite-looking wait.
+        """
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Downloading full journal ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return None
+
+        remote_tmp = f"/tmp/or{room.number}-full-journal.log"
+        try:
+            self._begin(2)
+            prefix = self._read_sudo_prefix()
+            self.log("Dumping journal to a temp file on the room...", "detail")
+            dump_cmd = (
+                f"{prefix} journalctl --no-pager > {shlex.quote(remote_tmp)} 2>&1"
+            ).strip()
+            run_command(client, dump_cmd)
+            self._advance()  # dumped
+
+            dest_dir = Path(dest_dir)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            dest = dest_dir / f"or{room.number}-journal-{timestamp}.txt"
+            local_tmp = dest_dir / f".or{room.number}-journal-{timestamp}.tmp"
+
+            self.log("Downloading journal file...", "detail")
+            try:
+                download_file(client, remote_tmp, str(local_tmp), self.progress, self.log)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Download failed: {exc}", "error")
+                return None
+            self._advance()  # downloaded
+
+            banner = (
+                f"Matrix Deploy full journal export\n"
+                f"Room: OR {room.number} ({room.name})\n"
+                f"Host: {conn.router_ip}:{room.ssh_port(conn.ssh_port_base)}\n"
+                f"Generated: {timestamp}\n\n"
+            )
+            with open(dest, "w", encoding="utf-8", errors="replace") as out_f:
+                out_f.write(banner)
+                with open(local_tmp, "r", encoding="utf-8", errors="replace") as in_f:
+                    shutil.copyfileobj(in_f, out_f)
+            local_tmp.unlink(missing_ok=True)
+
+            self.log(f"OR {room.number}: saved full journal to {dest}", "success")
+            return dest
+        finally:
+            run_command(client, f"rm -f {shlex.quote(remote_tmp)}")
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def check_system_errors(self, room: Room, hours: int = 3) -> bool:
+        """Connect to a room and report error-and-above messages (priority
+        err/crit/alert/emerg) from the last ``hours`` hours, split into the
+        kernel ring buffer and the full journal (every systemd unit).
+
+        Kernel-only issues (watchdog resets, driver faults, hardware errors
+        like the HDA codec probe failure) show up in "Kernel"; anything else
+        misbehaving at the same time - matrix-api/barco-nms crashes, failed
+        units, etc. - shows up in "All services", so a hardware fault can be
+        correlated with whatever service issue it triggered instead of
+        needing a second, separate lookup.
+        """
+        self.log(f"=== OR {room.number}: System Errors (last {hours}h) ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            prefix = self._read_sudo_prefix()
+            since = shlex.quote(f"-{hours}h")
+            sections = [
+                ("Kernel", f"{prefix} journalctl -k --no-pager -p err --since {since}".strip()),
+                ("All services", f"{prefix} journalctl --no-pager -p err --since {since}".strip()),
+            ]
+            out_lines: List[str] = []
+            for label, cmd in sections:
+                lines: List[str] = []
+                run_command(client, cmd, get_pty=True, on_line=lines.append)
+                if lines:
+                    out_lines.append(f"OR {room.number}: --- {label} ---")
+                    out_lines.extend(f"OR {room.number}: {line}" for line in lines)
+            self._advance()
+            if not out_lines:
+                self.log(
+                    f"OR {room.number}: no errors in the last {hours}h.",
+                    "success",
+                )
+                return True
+            self.log("\n".join(out_lines), "detail")
+            return True
         finally:
             try:
                 client.close()
