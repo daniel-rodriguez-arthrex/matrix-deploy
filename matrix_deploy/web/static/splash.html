@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<!-- Shown by run_server.py the moment the app is launched (opened as a local
+     file, before the server exists). Polls the server and swaps to the real
+     UI as soon as it answers. Self-contained: no network fonts/scripts. -->
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Matrix Deploy</title>
+<style>
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    font-family: "Segoe UI", system-ui, sans-serif; background: #f4f7f6; color: #1f2d2a;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #0f1614; color: #e6efec; } }
+  .box { text-align: center; }
+  .mark {
+    width: 56px; height: 56px; margin: 0 auto 18px; border-radius: 14px; display: grid; place-items: center;
+    background: linear-gradient(135deg, #10b981, #059669); color: #fff;
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; font-weight: 600; }
+  p { margin: 0; font-size: 13px; opacity: .7; }
+  .bar { width: 220px; height: 4px; margin: 20px auto 0; border-radius: 4px; background: rgba(16,185,129,.18); overflow: hidden; }
+  .bar::after { content: ""; display: block; width: 40%; height: 100%; background: #10b981; border-radius: 4px; animation: slide 1.1s ease-in-out infinite; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+  .err .bar { display: none; }
+  .err p { opacity: 1; color: #dc2626; max-width: 420px; line-height: 1.5; }
+</style>
+</head>
+<body>
+<div class="box" id="box">
+  <div class="mark">
+    <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+  </div>
+  <h1>Matrix Deploy</h1>
+  <p id="msg">Starting&hellip;</p>
+  <div class="bar"></div>
+</div>
+<script>
+  const port = new URLSearchParams(location.search).get("port") || "8420";
+  const target = `http://127.0.0.1:${port}/`;
+  const started = Date.now();
+  async function poll() {
+    try {
+      // no-cors: from a file:// page we can't read the reply, but the request
+      // only succeeds once the server is actually listening.
+      await fetch(`${target}api/health`, { mode: "no-cors", cache: "no-store" });
+      location.replace(target);
+      return;
+    } catch (_) { /* not up yet */ }
+    const waited = (Date.now() - started) / 1000;
+    if (waited > 45) {
+      document.getElementById("box").classList.add("err");
+      document.getElementById("msg").textContent =
+        "Matrix Deploy didn't start. Close this window and try again. If it keeps happening, " +
+        "check matrixdeploy.log in the MatrixDeploy folder.";
+      return;
+    }
+    if (waited > 8) document.getElementById("msg").textContent = "Still starting\u2026 (first launch can take a little longer)";
+    setTimeout(poll, 250);
+  }
+  poll();
+</script>
+</body>
+</html>

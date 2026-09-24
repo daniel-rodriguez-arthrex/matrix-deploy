@@ -100,12 +100,16 @@ def _is_matrix_deploy(port: int) -> bool:
 def _running_instance(preferred: int) -> Optional[int]:
     """Port of an already-running Matrix Deploy near ``preferred`` (the same
     range ``_find_open_port`` uses), so a second double-click reuses it even
-    if something else took the preferred port."""
+    if something else took the preferred port. Probes with bind(), which is
+    instant: connecting to a closed port on Windows waits out the timeout,
+    which made this scan take ~10s."""
     for port in range(preferred, preferred + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.settimeout(0.2)
-            if sock.connect_ex((HOST, port)) != 0:
-                continue
+            try:
+                sock.bind((HOST, port))
+                continue  # free, so nothing is running here
+            except OSError:
+                pass
         if _is_matrix_deploy(port):
             return port
     return None
@@ -145,15 +149,9 @@ def main() -> None:
     args = parser.parse_args()
     auto_exit = FROZEN and not args.keep_running
 
-    try:
-        import uvicorn
-
-        from matrix_deploy.config import AppConfig, config_dir
-        from matrix_deploy.preflight import format_report, run_preflight, summarize
-        from matrix_deploy.web.server import create_app
-    except ImportError as exc:
-        _alert(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
-        sys.exit(1)
+    # Light imports only until the loading screen is up.
+    from matrix_deploy.config import AppConfig, config_dir
+    from matrix_deploy.preflight import STATIC_DIR, format_report, run_preflight, summarize
 
     config, config_error = None, None
     try:
@@ -163,18 +161,17 @@ def main() -> None:
     except (KeyError, TypeError, ValueError) as exc:
         config_error = f"Site profile is invalid ({exc.__class__.__name__}: {exc})."
 
-    checks = run_preflight(config, config_error, network_timeout=2.0)
-    report = f"Matrix Deploy - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
-    ok = summarize(checks)["ok"]
     if args.check:
+        checks = run_preflight(config, config_error, network_timeout=2.0)
+        report = f"Matrix Deploy - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
+        ok = summarize(checks)["ok"]
         if FROZEN and not HAS_CONSOLE:
             _alert(report, error=not ok)
         else:
             print(report)
         sys.exit(0 if ok else 1)
-    print(report)
     if config is None:
-        _alert("Matrix Deploy can't start:\n\n" + format_report(checks))
+        _alert("Matrix Deploy can't start:\n\n" + format_report(run_preflight(None, config_error, network=False)))
         sys.exit(1)
 
     running = _running_instance(args.port)
@@ -187,6 +184,20 @@ def main() -> None:
 
     port = _find_open_port(HOST, args.port)
     url = f"http://{HOST}:{port}"
+    # Show the loading screen now; it switches to the app once the server answers.
+    if not args.no_browser:
+        _open_window(f"{(STATIC_DIR / 'splash.html').as_uri()}?port={port}")
+
+    try:
+        import uvicorn
+
+        from matrix_deploy.web.server import create_app
+    except ImportError as exc:
+        _alert(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
+        sys.exit(1)
+
+    # Log-only summary; the network check runs in the app (Settings > Setup Check).
+    print(f"Matrix Deploy - Setup Check\n{format_report(run_preflight(config, network=False))}")
     app = create_app(config)
     server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning" if FROZEN else "info"))
 
@@ -200,9 +211,6 @@ def main() -> None:
                     server.should_exit = True
 
         threading.Thread(target=watchdog, daemon=True).start()
-
-    if not args.no_browser:
-        threading.Timer(1.0, lambda: _open_window(url)).start()
 
     print(f"\nMatrix Deploy is running at {url}")
     print("Close the app window to quit." if auto_exit else "Press Ctrl+C to stop.")
