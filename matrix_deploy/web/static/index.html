@@ -72,6 +72,7 @@
         <button class="tab" data-tab="logs">Logs</button>
         <button class="tab" data-tab="tunnels">Tunnels</button>
         <button class="tab" data-tab="settings">Settings</button>
+        <button class="tab" data-tab="faq">FAQ</button>
       </nav>
       <div class="job-indicator" id="job-indicator">
         <span class="dot idle"></span>
@@ -411,6 +412,19 @@
           </div>
         </div>
       </section>
+
+      <!-- FAQ TAB -->
+      <section class="tab-panel" data-panel="faq">
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.1 9a3 3 0 0 1 5.8 1c0 2-3 3-3 3M12 17h.01"/></svg> FAQ &amp; Reference</h2><span class="badge subtle" id="faq-count"></span></div>
+          <div class="field-row" style="margin-bottom:12px;">
+            <label class="field grow"><input type="text" id="faq-search" placeholder="Search questions and answers (e.g. 403, token, fingerprint)" autocomplete="off" /></label>
+            <button class="ghost sm" id="faq-expand">Expand all</button>
+          </div>
+          <div id="faq-list"></div>
+          <span class="empty-hint" id="faq-empty" hidden>No matches. Try a different word.</span>
+        </div>
+      </section>
     </div>
 
     <!-- Persistent console -->
@@ -499,6 +513,7 @@
   </div>
 </div>
 
+<script src="/static/faq.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

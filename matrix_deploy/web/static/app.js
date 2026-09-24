@@ -538,6 +538,44 @@ document.addEventListener("click", (e) => {
   if (b) runPreflightFix(b.dataset.pfFix);
 });
 el("setup-banner-open").addEventListener("click", openSettingsTab);
+
+/* ---------- FAQ ---------- */
+// Content lives in faq.js (window.FAQ_SECTIONS); answers are trusted HTML.
+function renderFaq() {
+  const sections = window.FAQ_SECTIONS || [];
+  el("faq-list").innerHTML = sections.map((s) =>
+    `<div class="faq-section"><h3>${escapeHtml(s.title)}</h3>` +
+    s.items.map((it) =>
+      `<details class="faq-item"><summary>${escapeHtml(it.q)}</summary><div class="faq-answer">${it.a}</div></details>`
+    ).join("") + "</div>"
+  ).join("");
+  el("faq-count").textContent = `${sections.reduce((n, s) => n + s.items.length, 0)} answers`;
+}
+function filterFaq() {
+  const terms = el("faq-search").value.toLowerCase().split(/\s+/).filter(Boolean);
+  let shown = 0;
+  document.querySelectorAll("#faq-list .faq-section").forEach((sec) => {
+    let secShown = 0;
+    sec.querySelectorAll(".faq-item").forEach((item) => {
+      const text = item.textContent.toLowerCase();
+      const match = terms.every((t) => text.includes(t));
+      item.hidden = !match;
+      item.open = terms.length > 0 && match;
+      secShown += match;
+    });
+    sec.hidden = secShown === 0;
+    shown += secShown;
+  });
+  el("faq-empty").hidden = shown > 0;
+}
+renderFaq();
+el("faq-search").addEventListener("input", filterFaq);
+el("faq-expand").addEventListener("click", () => {
+  const items = [...document.querySelectorAll("#faq-list .faq-item:not([hidden])")];
+  const open = !items.every((d) => d.open);
+  items.forEach((d) => (d.open = open));
+  el("faq-expand").textContent = open ? "Collapse all" : "Expand all";
+});
 el("preflight-rerun").addEventListener("click", loadPreflight);
 function setRoomStatus(number, status) {
   const dot = document.querySelector(`.status[data-status="${number}"]`);
