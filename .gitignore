@@ -12,13 +12,14 @@ venv/
 *.key
 *.pem
 
-# Site-specific config - copy config/deploy_config.example.json instead
-config/deploy_config.json
+# Site-specific config profiles (real router IPs / per-room network details) -
+# copy config/deploy_config.example.json to create your own. Only the example
+# is committed.
+config/*.json
+!config/deploy_config.example.json
 
-# Personal config template scratch files (may contain real credentials
-# pasted in during testing) - copy matrix_deploy/template/example.config.json
-matrix_deploy/template/*.json
-!matrix_deploy/template/example.config.json
+# Per-lab credential files (plaintext SSH/sudo/switch/router passwords).
+config/*.env
 
 # Local artifacts
 *.swu

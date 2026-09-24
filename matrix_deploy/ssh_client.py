@@ -174,6 +174,25 @@ def upload_file(
         )
 
 
+def upload_dir(
+    client: paramiko.SSHClient,
+    local_dir: str,
+    remote_path: str,
+    log: Optional[Logger] = None,
+) -> None:
+    """Recursively upload a local directory via SCP.
+
+    Used by the web app deploy flow to push a full ``dist``/web-assets
+    folder in one shot instead of walking it file-by-file over SFTP.
+    """
+    start = time.monotonic()
+    with SCPClient(client.get_transport()) as scp:
+        scp.put(local_dir, remote_path, recursive=True)
+    elapsed = time.monotonic() - start
+    if log is not None:
+        log(f"Uploaded {local_dir} in {elapsed:.1f}s.", "detail")
+
+
 def download_file(
     client: paramiko.SSHClient,
     remote_path: str,

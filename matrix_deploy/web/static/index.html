@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8" />
+<script>document.documentElement.setAttribute("data-theme", localStorage.getItem("md-theme") || "light");</script>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Matrix Deploy</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<div class="app">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+      </span>
+      <div class="brand-text">
+        <strong>Matrix Deploy</strong>
+        <small>v3.0 &middot; web</small>
+      </div>
+    </div>
+
+    <label class="site-picker">
+      <span class="site-label">Site</span>
+      <select id="site-select"></select>
+    </label>
+
+    <div class="conn-card" id="connection-info">
+      <span class="dot"></span>
+      <span class="conn-text">Loading&hellip;</span>
+    </div>
+
+    <div class="sidebar-section">
+      <div class="section-head">
+        <span>Operating Rooms</span>
+        <span class="counter" id="room-counter">0/0</span>
+      </div>
+      <div class="room-actions">
+        <button class="ghost sm" id="select-all">All</button>
+        <button class="ghost sm" id="select-none">None</button>
+      </div>
+      <div id="rooms" class="room-grid"></div>
+    </div>
+
+    <div class="cred-box">
+      <div class="section-head"><span>Credentials</span><span class="badge subtle">memory only</span></div>
+      <label class="field"><span>SSH password</span><input type="password" id="ssh-password" autocomplete="off" /></label>
+      <label class="field"><span>Sudo password</span><input type="password" id="sudo-password" autocomplete="off" /></label>
+    </div>
+
+    <div class="sidebar-footer">
+      <button class="theme-toggle" id="theme-toggle" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+        <span class="theme-label">Theme</span>
+      </button>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <header class="topbar">
+      <nav class="tabs" id="tabs">
+        <button class="tab active" data-tab="deploy">Deploy</button>
+        <button class="tab" data-tab="config">Config</button>
+        <button class="tab" data-tab="webapp">Web App</button>
+        <button class="tab" data-tab="actions">Actions</button>
+        <button class="tab" data-tab="logs">Logs</button>
+        <button class="tab" data-tab="tunnels">Tunnels</button>
+        <button class="tab" data-tab="settings">Settings</button>
+      </nav>
+      <div class="job-indicator" id="job-indicator">
+        <span class="dot idle"></span>
+        <span id="job-status-text">Idle</span>
+      </div>
+    </header>
+
+    <div class="work">
+      <!-- Setup Check banner (shown only when something needs attention) -->
+      <div class="setup-banner" id="setup-banner" hidden>
+        <span class="setup-banner-text" id="setup-banner-text"></span>
+        <button class="primary sm" id="setup-banner-fix" hidden></button>
+        <button class="ghost sm" id="setup-banner-open">View Setup Check</button>
+      </div>
+
+      <!-- DEPLOY TAB -->
+      <section class="tab-panel active" data-panel="deploy">
+        <div class="card accent">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v13M6 8l6-6 6 6M4 22h16"/></svg> SWU Firmware Deploy</h2></div>
+          <p class="hint">Download the latest build (or point to a local SWU), then upload it to each selected room, install via swupdate-client, and wait for reboot. Config changes live in the <strong>Config</strong> tab.</p>
+
+          <div class="subgroup">
+            <div class="subgroup-label">1. Get the SWU</div>
+            <div class="field-row">
+              <label class="field"><span>Artifactory email</span><input type="text" id="artifactory-email" autocomplete="off" /></label>
+              <label class="field"><span>Artifactory token</span><input type="password" id="artifactory-token" autocomplete="off" /></label>
+            </div>
+            <div class="field-row">
+              <label class="field grow"><span>Download folder</span><input type="text" id="download-dir" placeholder="Default: Desktop\latest-matrix-wrynose" /></label>
+              <button class="action" id="download-latest">
+                <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                Download Latest SWU
+              </button>
+            </div>
+          </div>
+
+          <div class="subgroup">
+            <div class="subgroup-label">2. Deploy to rooms</div>
+            <div class="field-row">
+              <label class="field grow"><span>SWU file path</span><input type="text" id="swu-file" placeholder="C:\path\to\build.swu" /></label>
+              <button class="action" id="browse-swu"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg> Browse</button>
+            </div>
+          </div>
+
+          <div class="deploy-footer">
+            <div class="segmented" id="deploy-concurrency">
+              <button class="seg active" data-value="1">Sequential</button>
+              <button class="seg" data-value="2">2&times;</button>
+              <button class="seg" data-value="3">3&times;</button>
+              <button class="seg" data-value="0">All</button>
+            </div>
+            <button id="start-deploy" class="primary lg">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 3 14 9-14 9V3Z"/></svg>
+              Start Deployment
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7 0l3-3a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-3 3a5 5 0 0 0 7 7l1-1"/></svg> Jenkins Build</h2></div>
+          <p class="hint">Kick off a new Embedded Builder Jenkins build (matrix / wrynose). Credentials prefill from your <code>.env</code>.</p>
+          <div class="field-row">
+            <label class="field"><span>Jenkins username</span><input type="text" id="jenkins-username" autocomplete="off" /></label>
+            <label class="field"><span>Jenkins token</span><input type="password" id="jenkins-token" autocomplete="off" /></label>
+            <button class="action" id="trigger-build">Trigger Build</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- CONFIG TAB -->
+      <section class="tab-panel" data-panel="config">
+        <div class="card" id="config-card">
+          <div class="card-head">
+            <h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg> Live Config Editor</h2>
+            <span class="badge subtle">matrix.api.config.json</span>
+            <button class="ghost sm" id="config-fullscreen" style="margin-left:auto;">Full screen</button>
+          </div>
+          <p class="hint">Load a room's live config and edit it. <strong>Deploy &amp; Restart</strong> pushes the whole file back to that room. <strong>Apply Changes to Selected Rooms</strong> sends only the fields you changed to the rooms ticked in the sidebar &mdash; each room keeps its own room-specific values.</p>
+          <div class="config-bar">
+            <label class="field"><span>Room</span>
+              <select id="config-room"></select>
+            </label>
+            <button class="action" id="config-load">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+              Load
+            </button>
+            <span class="config-status" id="config-status"></span>
+            <button class="primary" id="config-deploy" disabled>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v13M6 8l6-6 6 6M4 22h16"/></svg>
+              Deploy &amp; Restart
+            </button>
+            <button class="action" id="config-apply-selected" disabled>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+              Apply Changes to Selected Rooms
+            </button>
+          </div>
+          <textarea id="config-editor" class="code-editor" spellcheck="false" placeholder="Load a room to edit its live matrix.api.config.json here..."></textarea>
+        </div>
+      </section>
+
+      <!-- WEB APP TAB -->
+      <section class="tab-panel" data-panel="webapp">
+        <div class="card accent">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg> Web App Build &amp; Deploy</h2></div>
+          <p class="hint">Builds (optional) and deploys the Matrix Electron web app + matrix.api backend to each selected room over SSH, then restarts matrix-api. Ported from the standalone matrix-electron-web-deployer tool.</p>
+
+          <div class="subgroup-head">
+            <span class="subgroup-label">Mode</span>
+            <div class="segmented sm-seg" id="webapp-mode">
+              <button class="seg active" data-mode="deploy">Deploy existing build</button>
+              <button class="seg" data-mode="build-deploy">Build + deploy</button>
+              <button class="seg" data-mode="build">Build only</button>
+            </div>
+          </div>
+          <p class="hint" id="webapp-mode-hint"></p>
+
+          <div class="subgroup" id="webapp-build-fields" hidden>
+            <div class="subgroup-label">Source repositories</div>
+            <div class="field-row">
+              <label class="field grow"><span>Backend repo (matrix-api-linux)</span><input type="text" id="webapp-backend-repo" placeholder="..\repos\matrix-api-linux" /></label>
+              <label class="field grow"><span>Web app repo (matrix-app-linux)</span><input type="text" id="webapp-web-repo" placeholder="..\repos\matrix-app-linux" /></label>
+            </div>
+          </div>
+
+          <div class="subgroup">
+            <div class="subgroup-label" id="webapp-artifacts-label">Built artifacts</div>
+            <div class="field-row">
+              <label class="field grow"><span>Backend dist folder</span><input type="text" id="webapp-local-dist" placeholder="..\repos\matrix-api-linux\dist" /></label>
+              <label class="field grow"><span>Web assets folder</span><input type="text" id="webapp-local-web" placeholder="..\repos\matrix-app-linux\dist\arthrex-synergy-matrix" /></label>
+            </div>
+          </div>
+
+          <div class="deploy-footer">
+            <div class="segmented" id="webapp-concurrency">
+              <button class="seg active" data-value="1">Sequential</button>
+              <button class="seg" data-value="2">2&times;</button>
+              <button class="seg" data-value="3">3&times;</button>
+              <button class="seg" data-value="0">All</button>
+            </div>
+            <button id="start-webapp-deploy" class="primary lg">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 3 14 9-14 9V3Z"/></svg>
+              <span id="webapp-go-label">Deploy</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg> Configure, Reset &amp; Diagnostics</h2></div>
+          <p class="hint">Configure sets the web-app folders/pairing key and trusts all room API origins. Reset undoes a previous web app deploy (removes staged/deployed files, restores the original systemd entrypoint). Diagnose dumps web asset listings, config values, service status, and AppArmor denials - useful for chasing 403s on static JS assets.</p>
+          <div class="action-grid">
+            <button class="action" data-action="configure_web_app">Configure Web App</button>
+            <button class="action warn" data-action="reset_web_app">Reset Web App</button>
+            <button class="action" data-action="diag_web_app">Diagnose Web App</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ACTIONS TAB -->
+      <section class="tab-panel" data-panel="actions">
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.9 3 16V8l9-4.9L21 8v8Z"/><circle cx="12" cy="12" r="3"/></svg> Services</h2></div>
+          <div class="subgroup-head">
+            <span class="subgroup-label">Target service</span>
+            <div class="segmented sm-seg" id="service-selector">
+              <button class="seg active" data-service="matrix"><span class="svc-dot api"></span> Matrix API</button>
+              <button class="seg" data-service="nms"><span class="svc-dot nms"></span> Barco NMS</button>
+            </div>
+          </div>
+          <div class="action-grid">
+            <button class="action" id="svc-status"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg> Status</button>
+            <button class="action" id="svc-stream"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4v16M4 8h6a4 4 0 0 1 0 8H4M20 4v16M20 8h-4a4 4 0 0 0 0 8h4"/></svg> Stream Live</button>
+            <button class="action warn" id="svc-restart"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"/></svg> Restart</button>
+            <button class="action danger-action" id="svc-stop"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg> Stop</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> Diagnostics</h2></div>
+          <div class="action-grid">
+            <button class="action" data-action="check_uptime"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg> Uptime</button>
+            <button class="action" data-action="check_disk_space"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H2M5.5 6h13l3 6v4a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-4l3-6Z"/></svg> Disk Space</button>
+            <button class="action" data-action="check_specs"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="8" width="8" height="8" rx="1"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/></svg> Specs</button>
+            <span class="config-status">Looking for errors? See <em>Logs &rarr; Show Errors</em>.</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg> NMS Configuration</h2></div>
+          <p class="hint">To open a room's NMS Demonstrator, use the <strong>NMS</strong> button on its row in the sidebar (it also copies the login password).</p>
+          <div class="subgroup">
+            <div class="subgroup-label">Bandwidth preset</div>
+            <div class="action-grid">
+              <button class="action" data-action="nms_bandwidth" data-bandwidth="MAX">Max Bandwidth</button>
+              <button class="action" data-action="nms_bandwidth" data-bandwidth="LIMITED">Limited Bandwidth</button>
+              <button class="action" data-action="remove_overlay">Remove Video Overlay</button>
+            </div>
+          </div>
+          <div class="subgroup">
+            <div class="subgroup-label">Custom link bandwidth</div>
+            <div class="field-row cmd-row">
+              <label class="field"><input type="number" id="link-kbps" placeholder="kbps (e.g. 500000)" /></label>
+              <button class="action" id="apply-link-bw">Apply Link Bandwidth</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4l-6 6V21h3.3l6-6a4 4 0 0 0 5.4-5.4l-2.3 2.3-2-2 2.3-2.3Z"/></svg> Config Fixes</h2></div>
+          <div class="action-grid">
+            <button class="action" data-action="set_log_debug">Set Log Level: Debug</button>
+            <button class="action" data-action="fix_room_config_race">Fix Room Config Race</button>
+            <button class="action warn" data-action="matrix_api_certs">Regenerate API Certs</button>
+          </div>
+          <div class="subgroup">
+            <div class="subgroup-label">Add trusted endpoint</div>
+            <div class="field-row cmd-row">
+              <label class="field grow"><input type="text" id="trusted-endpoint" placeholder="https://host:port or IP" /></label>
+              <button class="action" id="add-trusted">Add Endpoint</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/></svg> Power &amp; Maintenance</h2></div>
+          <div class="action-grid">
+            <button class="action warn" data-action="reboot"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"/></svg> Reboot</button>
+            <button class="action danger-action" data-action="shutdown"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/></svg> Shutdown</button>
+            <button class="action" data-action="remove_fingerprint"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg> Remove SSH Fingerprint</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg> Custom Command</h2></div>
+          <div class="field-row cmd-row">
+            <label class="field grow"><input type="text" id="custom-command" placeholder="uname -a" /></label>
+            <label class="checkline"><input type="checkbox" id="use-sudo" /> <span>sudo</span></label>
+            <button class="action" data-action="run_command">Run</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- LOGS TAB -->
+      <section class="tab-panel" data-panel="logs">
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg> Logs Export</h2></div>
+          <p class="hint">Downloads logs from each selected room as a text file (appears under Downloads below). Progress shows in the console.</p>
+          <div class="config-bar">
+            <label class="field"><span>Scope</span>
+              <select id="log-scope">
+                <option value="get_logs" selected>Matrix services (matrix-api + barco-nms)</option>
+                <option value="get_full_journal">Entire system (all units + kernel)</option>
+              </select>
+            </label>
+            <label class="field"><span>Time range</span>
+              <select id="log-since">
+                <option value="1">Last 1 hour</option>
+                <option value="8">Last 8 hours</option>
+                <option value="24" selected>Last 24 hours</option>
+                <option value="72">Last 3 days</option>
+                <option value="120">Last 5 days</option>
+                <option value="168">Last 7 days</option>
+              </select>
+            </label>
+            <button class="action" id="download-logs"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> Download Logs</button>
+          </div>
+          <div class="subgroup">
+            <div class="subgroup-label">Quick error scan</div>
+            <div class="action-grid">
+              <button class="action" id="show-errors"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/></svg> Show Errors</button>
+              <span class="config-status">Prints error-level kernel + service messages for the time range above to the console (no file).</span>
+            </div>
+          </div>
+          <div class="subgroup">
+            <div class="subgroup-label">Full support bundle</div>
+            <div class="action-grid">
+              <button class="action" data-action="export_bundle"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8M1 3h22v5H1zM10 12h4"/></svg> Support Bundle</button>
+              <span class="config-status">Official get-support zip (diagnostics, config, NMS bundle, entire journal). Large; needs sudo. Ignores the time range.</span>
+            </div>
+          </div>
+          <div class="downloads" id="downloads">
+            <div class="subgroup-label">Downloads</div>
+            <div id="downloads-list" class="downloads-list"><span class="empty-hint">No files yet.</span></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TUNNELS TAB -->
+      <section class="tab-panel" data-panel="tunnels">
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h20M6 12a6 6 0 0 1 12 0M10 12a2 2 0 0 1 4 0"/></svg> Matrix App Remote</h2></div>
+          <p class="hint">Inspect and screenshot a room's Matrix App (Electron kiosk) over an SSH tunnel. Uses the SSH password from the sidebar. The room picker follows the room you tick in the sidebar. For the NMS Demonstrator or the web app, use the <strong>NMS</strong> / <strong>App</strong> buttons on the room's row in the sidebar.</p>
+          <div class="config-bar">
+            <label class="field"><span>Room</span><select id="tunnel-room"></select></label>
+          </div>
+          <div class="subgroup">
+            <div class="subgroup-label">Matrix App (Electron kiosk)</div>
+            <div class="action-grid">
+              <button class="action warn" id="enable-matrix-app"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0"/></svg> Enable Remote Debugging</button>
+              <button class="action" id="disable-matrix-app"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></svg> Disable Remote Debugging</button>
+              <button class="action" id="open-matrix-app"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg> View Matrix App (DevTools)</button>
+              <button class="action" id="screenshot-matrix-app"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg> Screenshot</button>
+              <span class="config-status">Enable relaunches the kiosk app with DevTools (needs sudo). Then View opens the inspector in a Chromium browser, and Screenshot saves a PNG of the app. Disable removes the flags and relaunches the kiosk normally.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></svg> Active Tunnels</h2></div>
+          <div id="tunnels-list" class="downloads-list"><span class="empty-hint">No active tunnels.</span></div>
+        </div>
+      </section>
+
+      <!-- SETTINGS TAB -->
+      <section class="tab-panel" data-panel="settings">
+        <div class="card" id="preflight-card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Setup Check</h2><span class="badge subtle" id="preflight-badge">checking&hellip;</span></div>
+          <p class="hint">Confirms this computer has everything Matrix Deploy needs. Red items stop the tool from working; amber items only affect optional features.</p>
+          <div class="preflight-list" id="preflight-list"></div>
+          <div class="action-grid" style="margin-top:10px;">
+            <button class="ghost sm" id="preflight-rerun">Re-run check</button>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg> Connection</h2><span class="badge subtle">config/deploy_config.json</span></div>
+          <p class="hint">Active site connection loaded from <code>config/deploy_config.json</code>. Edit that file to retarget the environment, then restart the server.</p>
+          <div class="settings-grid" id="settings-connection"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16v6H4zM4 14h16v6H4z"/><path d="M8 7h.01M8 17h.01"/></svg> Environment Prefill (.env)</h2><span class="badge subtle" id="env-badge">checking&hellip;</span></div>
+          <p class="hint">Values from your <code id="env-path">.env</code> auto-fill the credential, Artifactory, Jenkins and SWU fields on load. Use <em>Edit saved credentials</em> to change what's saved on this computer.</p>
+          <div class="settings-grid" id="settings-env"></div>
+          <div class="action-grid" style="margin-top:10px;">
+            <button class="action" id="edit-creds">Edit saved credentials</button>
+            <button class="ghost sm" id="reload-setup">Reload from .env</button>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Persistent console -->
+    <div class="console-dock" id="console-dock">
+      <div class="console-resizer" id="console-resizer" title="Drag to resize the console"></div>
+      <div class="console-header">
+        <div class="console-tabbar" id="console-tabs"></div>
+        <div class="console-tools">
+          <button class="ghost sm" id="console-expand" title="Maximize / restore the console">Expand</button>
+          <button class="ghost sm" id="copy-console" title="Copy the active console tab to the clipboard">Copy</button>
+          <button class="ghost sm" id="clear-console" title="Clear the active console tab">Clear</button>
+          <button class="danger sm" id="cancel-job" disabled>Cancel</button>
+        </div>
+      </div>
+      <div class="console-panels" id="console-panels"></div>
+    </div>
+  </main>
+</div>
+
+<!-- Build selection modal (Download Latest SWU) -->
+<div class="modal-overlay" id="branch-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="branch-modal-title">
+    <div class="modal-head">
+      <h3 id="branch-modal-title">Select build to download</h3>
+      <button class="modal-close" id="branch-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p class="hint">Choose which build source to pull the latest SWU from.</p>
+    <div class="modal-body" id="branch-modal-options"></div>
+    <div class="modal-actions">
+      <button class="ghost sm" id="branch-modal-cancel">Cancel</button>
+      <button class="action" id="branch-modal-confirm">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+        Download
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- First-run / edit credentials modal -->
+<div class="modal-overlay" id="creds-modal" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="creds-modal-title">
+    <div class="modal-head">
+      <h3 id="creds-modal-title">Set up <span id="creds-site">this lab</span></h3>
+      <button class="modal-close" id="creds-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <p class="hint">Enter these once &mdash; they're saved on this computer and filled in automatically next time. Leave a field blank to keep what's already saved.</p>
+    <div class="modal-body">
+      <label class="field"><span>SSH password</span><input type="password" id="creds-ssh" autocomplete="off" /></label>
+      <label class="field"><span>Sudo password</span><input type="password" id="creds-sudo" autocomplete="off" /></label>
+      <details id="creds-shared">
+        <summary class="hint" style="cursor:pointer;">Artifactory &amp; Jenkins (optional, shared by all labs &mdash; use your own account)</summary>
+        <div class="field-row" style="margin-top:8px;">
+          <label class="field"><span>Artifactory email</span><input type="text" id="creds-art-email" autocomplete="off" /></label>
+          <label class="field"><span>Artifactory token</span><input type="password" id="creds-art-token" autocomplete="off" /></label>
+        </div>
+        <div class="field-row" style="margin-top:8px;">
+          <label class="field"><span>Jenkins username</span><input type="text" id="creds-jenkins-user" autocomplete="off" /></label>
+          <label class="field"><span>Jenkins token</span><input type="password" id="creds-jenkins-token" autocomplete="off" /></label>
+        </div>
+      </details>
+      <span class="config-status" id="creds-path"></span>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost sm" id="creds-modal-skip">Skip for now</button>
+      <button class="primary" id="creds-modal-save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- SWU file browser modal -->
+<div class="modal-overlay" id="browse-modal" hidden>
+  <div class="modal browse" role="dialog" aria-modal="true" aria-labelledby="browse-modal-title">
+    <div class="modal-head">
+      <h3 id="browse-modal-title">Select an SWU file</h3>
+      <button class="modal-close" id="browse-modal-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="browse-bar">
+      <button class="ghost sm" id="browse-up" title="Up one folder">&uarr; Up</button>
+      <input type="text" id="browse-path" spellcheck="false" />
+      <button class="ghost sm" id="browse-go">Go</button>
+    </div>
+    <div class="modal-body browse-list" id="browse-entries"></div>
+    <div class="modal-actions">
+      <button class="ghost sm" id="browse-modal-cancel">Close</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

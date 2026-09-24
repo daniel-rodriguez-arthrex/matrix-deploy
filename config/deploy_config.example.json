@@ -6,14 +6,20 @@
     "remote_config_path": "/usr/lib/node_modules/matrix.api/matrix.api.config.json",
     "service_name": "matrix-api",
     "swu_service_port": 8080,
-    "same_physical_host": false
+    "same_physical_host": false,
+    "remote_webapp_app_folder": "/opt/matrix-api-app",
+    "remote_webapp_node_module": "/usr/lib/node_modules/matrix.api",
+    "webapp_service_unit_path": "/usr/lib/systemd/system/matrix-api.service"
   },
   "artifactory": {
     "url": "https://your-artifactory.example.com/artifactory",
     "repo": "your-repo-name",
     "build_path": "path/to/builds",
     "build_name": "Embedded Builder",
-    "branch_filter": "main"
+    "branch_filter": "main",
+    "branches": [
+      { "label": "main", "build_path": "path/to/builds", "branch_filter": "main" }
+    ]
   },
   "rooms": [
     { "number": 1, "room_id": "10.0.1.12", "name": "OR 1" },

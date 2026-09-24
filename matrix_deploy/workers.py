@@ -433,10 +433,7 @@ class DeploymentWorker(QThread):
         creds: DeploymentCredentials,
         rooms: List[Room],
         do_swu: bool,
-        do_config: bool,
         swu_file: Optional[Path],
-        template_path: Optional[Path],
-        output_dir: Optional[Path],
         sequential: bool = True,
         max_concurrency: Optional[int] = None,
     ):
@@ -445,10 +442,7 @@ class DeploymentWorker(QThread):
         self.creds = creds
         self.rooms = rooms
         self.do_swu = do_swu
-        self.do_config = do_config
         self.swu_file = swu_file
-        self.template_path = template_path
-        self.output_dir = output_dir
         self.sequential = sequential
         # Cap on simultaneously in-flight rooms when not forced sequential.
         # None means "no cap" (all selected rooms at once).
@@ -488,10 +482,7 @@ class DeploymentWorker(QThread):
         request = DeploymentRequest(
             room=room,
             do_swu=self.do_swu,
-            do_config=self.do_config,
             swu_file=self.swu_file,
-            template_path=self.template_path,
-            output_dir=self.output_dir,
         )
 
         try:

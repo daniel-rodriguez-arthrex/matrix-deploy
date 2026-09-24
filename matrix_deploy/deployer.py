@@ -17,12 +17,11 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import paramiko
 
 from .config import AppConfig, Room, golden_nms_config_path, render_nms_user_config
-from .config_builder import build_room_config
 from .ssh_client import (
     SSHError,
     SSHTarget,
@@ -30,11 +29,13 @@ from .ssh_client import (
     download_file,
     get_disk_free_kb,
     run_command,
+    upload_dir,
     upload_file,
     wait_for_reboot,
 )
 
 Logger = Callable[[str, str], None]
+_MISSING = object()
 Progress = Callable[[int, int], None]
 Milestone = Callable[[int, int], None]  # steps_done, steps_total
 
@@ -49,11 +50,7 @@ class DeploymentCredentials:
 class DeploymentRequest:
     room: Room
     do_swu: bool
-    do_config: bool
     swu_file: Optional[Path] = None
-    config_file: Optional[Path] = None  # already-generated per-room JSON
-    template_path: Optional[Path] = None  # used to generate config if config_file is not provided
-    output_dir: Optional[Path] = None  # used to generate config if config_file is not provided
 
 
 class Deployer:
@@ -90,14 +87,11 @@ class Deployer:
     def _plan_steps(self, request: "DeploymentRequest") -> int:
         """Number of milestones for this request.
 
-        Always 1 for the connect step; SWU adds upload/install/online (3);
-        config adds upload/apply (2).
+        Always 1 for the connect step; SWU adds upload/install/online (3).
         """
         total = 1
         if request.do_swu:
             total += 3
-        if request.do_config:
-            total += 2
         return total
 
     def _begin(self, total: int) -> None:
@@ -143,57 +137,9 @@ class Deployer:
             return False
         self._advance()  # connected
 
-        # Fetch the room's default sudo password from the EEPROM.  This is
-        # unique per room and is also used as the NMS password in the
-        # generated matrix.api config.
-        room_password = self._fetch_room_password(client, room)
-        if request.do_config and not room_password:
-            self.log(
-                "Could not determine per-room NMS password and config deployment was requested.",
-                "error",
-            )
-            return False
-
-        config_file = request.config_file
-        if request.do_config:
-            if config_file is not None:
-                pass  # use pre-generated config
-            elif request.template_path and request.output_dir:
-                try:
-                    config_file = build_room_config(
-                        self.config,
-                        room,
-                        request.template_path,
-                        request.output_dir,
-                        room_password,
-                    )
-                    self.log(f"Generated config: {config_file.name}", "detail")
-                except Exception as exc:  # noqa: BLE001
-                    self.log(f"Config generation failed for OR {room.number}: {exc}", "error")
-                    return False
-            else:
-                self.log("Config deployment requested but no template or output directory provided.", "error")
-                return False
-
         try:
             if request.do_swu:
                 if not self._deploy_swu(client, room, request.swu_file):
-                    return False
-                # After a reboot the old client is dead - reconnect for config.
-                client.close()
-                if request.do_config:
-                    self.log("Reconnecting after reboot...", "info")
-                    try:
-                        client = connect(self._target(room))
-                    except SSHError as exc:
-                        self.log(str(exc), "error")
-                        return False
-                    # Re-fetch the password after reboot in case the old
-                    # connection state was lost.
-                    room_password = self._fetch_room_password(client, room)
-
-            if request.do_config:
-                if not self._deploy_config(client, room, config_file):
                     return False
 
             self.log(f"OR {room.number}: deployment complete", "success")
@@ -540,38 +486,6 @@ class Deployer:
 
     # -- Config -----------------------------------------------------------
 
-    def _deploy_config(
-        self,
-        client: paramiko.SSHClient,
-        room: Room,
-        config_file: Optional[Path],
-    ) -> bool:
-        if not config_file or not Path(config_file).exists():
-            self.log(f"Config file not found: {config_file}", "error")
-            return False
-        config_file = Path(config_file)
-
-        self.log("--- Config Deployment ---", "info")
-        conn = self.config.connection
-        remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
-
-        self.log("Uploading config...", "detail")
-        try:
-            upload_file(client, str(config_file), remote_staging)
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"Config upload failed: {exc}", "error")
-            return False
-        self._advance()  # config uploaded
-
-        self.log("Applying config and restarting service...", "detail")
-        if not self._apply_config_and_restart_service(client, room):
-            self.log("Config apply failed (service restart failed).", "error")
-            return False
-
-        self.log("Config applied and service restarted.", "success")
-        self._advance()  # config applied
-        return True
-
     def _apply_config_and_restart_service(
         self, client: paramiko.SSHClient, room: Room
     ) -> bool:
@@ -729,14 +643,26 @@ class Deployer:
         available, otherwise run unprivileged (avoids a hanging password prompt)."""
         return self._sudo_prefix() if self.creds.sudo_password else ""
 
+    @staticmethod
+    def _since_label(since_hours: int) -> str:
+        return f"{since_hours // 24}d" if since_hours % 24 == 0 else f"{since_hours}h"
+
     def fetch_service_logs(
-        self, room: Room, dest_dir: Path, lines: int = 2000
+        self, room: Room, dest_dir: Path, lines: int = 2000, since_hours: Optional[int] = None
     ) -> Optional[Path]:
         """Collect journald logs for matrix-api and barco-nms and save them to a
-        timestamped text file in ``dest_dir``. Returns the file path on success."""
+        timestamped text file in ``dest_dir``. Returns the file path on success.
+        With ``since_hours`` the export covers that time window instead of the
+        last ``lines`` lines."""
         conn = self.config.connection
         services = [conn.service_name, conn.nms_service_name]
-        self.log(f"=== OR {room.number}: Collecting logs ({', '.join(services)}) ===", "info")
+        if since_hours:
+            window = f"last {self._since_label(since_hours)}"
+            limit = f"--since {shlex.quote(f'-{int(since_hours)}h')}"
+        else:
+            window = f"last {lines} lines"
+            limit = f"-n {int(lines)}"
+        self.log(f"=== OR {room.number}: Collecting logs ({', '.join(services)}) - {window} ===", "info")
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -748,15 +674,15 @@ class Deployer:
             prefix = self._read_sudo_prefix()
             sections: List[str] = []
             for service in services:
-                self.log(f"Reading last {lines} log lines for {service}...", "detail")
+                self.log(f"Reading {window} of logs for {service}...", "detail")
                 collected: List[str] = []
                 cmd = (
-                    f"{prefix} journalctl -u {shlex.quote(service)} --no-pager -n {int(lines)}"
+                    f"{prefix} journalctl -u {shlex.quote(service)} --no-pager {limit}"
                 ).strip()
                 run_command(
                     client, cmd, get_pty=True, on_line=lambda l: collected.append(l)
                 )
-                header = f"{'=' * 70}\n{service} (last {lines} lines)\n{'=' * 70}"
+                header = f"{'=' * 70}\n{service} ({window})\n{'=' * 70}"
                 sections.append(header + "\n" + "\n".join(collected))
                 self._advance()
 
@@ -769,6 +695,7 @@ class Deployer:
                 f"Room: OR {room.number} ({room.name})\n"
                 f"Host: {conn.router_ip}:{room.ssh_port(conn.ssh_port_base)}\n"
                 f"Generated: {timestamp}\n"
+                f"Window: {window}\n"
             )
             dest.write_text(banner + "\n" + "\n\n".join(sections) + "\n", encoding="utf-8")
             self.log(f"Saved logs to {dest}", "success")
@@ -779,9 +706,12 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def fetch_full_journal(self, room: Room, dest_dir: Path) -> Optional[Path]:
+    def fetch_full_journal(
+        self, room: Room, dest_dir: Path, since_hours: Optional[int] = None
+    ) -> Optional[Path]:
         """Download the complete systemd journal (unfiltered - every unit,
-        every priority, no time window) to a timestamped text file in
+        every priority; limited to the last ``since_hours`` hours if given,
+        otherwise no time window) to a timestamped text file in
         ``dest_dir``. Returns the file path on success; nothing is printed
         to the log terminal besides progress/status.
 
@@ -792,7 +722,9 @@ class Deployer:
         indefinite-looking wait.
         """
         conn = self.config.connection
-        self.log(f"=== OR {room.number}: Downloading full journal ===", "info")
+        window = f"last {self._since_label(since_hours)}" if since_hours else "all available"
+        since_arg = f" --since {shlex.quote(f'-{int(since_hours)}h')}" if since_hours else ""
+        self.log(f"=== OR {room.number}: Downloading full journal ({window}) ===", "info")
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -805,7 +737,7 @@ class Deployer:
             prefix = self._read_sudo_prefix()
             self.log("Dumping journal to a temp file on the room...", "detail")
             dump_cmd = (
-                f"{prefix} journalctl --no-pager > {shlex.quote(remote_tmp)} 2>&1"
+                f"{prefix} journalctl --no-pager{since_arg} > {shlex.quote(remote_tmp)} 2>&1"
             ).strip()
             run_command(client, dump_cmd)
             self._advance()  # dumped
@@ -828,7 +760,8 @@ class Deployer:
                 f"Matrix Deploy full journal export\n"
                 f"Room: OR {room.number} ({room.name})\n"
                 f"Host: {conn.router_ip}:{room.ssh_port(conn.ssh_port_base)}\n"
-                f"Generated: {timestamp}\n\n"
+                f"Generated: {timestamp}\n"
+                f"Window: {window}\n\n"
             )
             with open(dest, "w", encoding="utf-8", errors="replace") as out_f:
                 out_f.write(banner)
@@ -840,6 +773,326 @@ class Deployer:
             return dest
         finally:
             run_command(client, f"rm -f {shlex.quote(remote_tmp)}")
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    @staticmethod
+    def _matrix_app_session_script(launcher: str) -> List[str]:
+        """Shell lines that validate the kiosk launcher and discover the
+        active Wayland/sway session env needed to relaunch the Matrix App."""
+        return [
+            f"launcher={shlex.quote(launcher)}",
+            'if ! test -f "$launcher"; then echo "Launcher not found: $launcher" >&2; exit 2; fi',
+            "if ! grep -Fq -- '--ozone-platform=wayland' \"$launcher\"; then echo \"Launcher has no supported Matrix App invocation.\" >&2; exit 3; fi",
+            'gui_session=$(loginctl list-sessions --no-legend 2>/dev/null | awk "{print \\$1}" | while read -r session; do',
+            '  [ "$(loginctl show-session "$session" -p Active --value 2>/dev/null)" = yes ] || continue',
+            '  [ "$(loginctl show-session "$session" -p Type --value 2>/dev/null)" = wayland ] || continue',
+            '  [ "$(loginctl show-session "$session" -p Class --value 2>/dev/null)" = user ] || continue',
+            '  printf "%s" "$session"; break',
+            "done)",
+            'if [ -z "$gui_session" ]; then echo "No active local Wayland session for Matrix App." >&2; exit 4; fi',
+            'app_user=$(loginctl show-session "$gui_session" -p Name --value)',
+            'app_uid=$(loginctl show-session "$gui_session" -p User --value)',
+            'sway_pid=$(pgrep -u "$app_uid" -x sway 2>/dev/null | head -n 1)',
+            'if [ -z "$sway_pid" ]; then echo "No Sway compositor running for $app_user." >&2; exit 5; fi',
+            'sway_env=$(tr "\\0" "\\n" < "/proc/$sway_pid/environ" 2>/dev/null || true)',
+            'runtime_dir=$(printf "%s\\n" "$sway_env" | sed -n "s/^XDG_RUNTIME_DIR=//p" | head -n 1)',
+            'wayland_display=$(printf "%s\\n" "$sway_env" | sed -n "s/^WAYLAND_DISPLAY=//p" | head -n 1)',
+            'sway_socket=$(printf "%s\\n" "$sway_env" | sed -n "s/^SWAYSOCK=//p" | head -n 1)',
+            'dbus_address=$(printf "%s\\n" "$sway_env" | sed -n "s/^DBUS_SESSION_BUS_ADDRESS=//p" | head -n 1)',
+            'runtime_dir=${runtime_dir:-/run/user/$app_uid}',
+            'if [ -z "$wayland_display" ]; then wayland_display=$(find "$runtime_dir" -maxdepth 1 -type s -name "wayland-*" -printf "%f\\n" 2>/dev/null | head -n 1); fi',
+            'if [ -z "$sway_socket" ]; then sway_socket=$(find "$runtime_dir" -maxdepth 1 -type s -name "sway-ipc.*.sock" -print -quit 2>/dev/null); fi',
+            'dbus_address=${dbus_address:-unix:path=$runtime_dir/bus}',
+        ]
+
+    @staticmethod
+    def _matrix_app_relaunch_script(port: int) -> List[str]:
+        """Shell lines that stop the running Matrix App and relaunch it via
+        the launcher inside the discovered sway session."""
+        return [
+            "app_pids=$(ps -eo pid=,args= | awk '/[e]lectron.*matrix-app\\.asar/ && $0 !~ /--type=/ {print $1}')",
+            '[ -n "$app_pids" ] && kill $app_pids 2>/dev/null || true',
+            "sleep 1",
+            # A lingering child (e.g. gdbus) can keep the debug port bound,
+            # making the relaunched app fail with "Address already in use".
+            # Free the port before relaunching.
+            f"port_holder=$(ss -ltnpH 'sport = :{port}' 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2)",
+            '[ -n "$port_holder" ] && kill "$port_holder" 2>/dev/null || true',
+            "sleep 1",
+            'runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" "DBUS_SESSION_BUS_ADDRESS=$dbus_address" swaymsg -s "$sway_socket" exec "$launcher" 2>&1',
+            'echo "Relaunch requested."',
+        ]
+
+    def _run_sudo_script(self, client: paramiko.SSHClient, script: str) -> bool:
+        """Run ``script`` as root via ``sudo -S bash -s`` (password on the
+        first stdin line, script after it), logging its output. Returns True
+        on exit status 0."""
+        stdin, stdout, stderr = client.exec_command("sudo -S -p '' bash -s")
+        stdin.write(self.creds.sudo_password + "\n")
+        stdin.write(script + "\n")
+        stdin.flush()
+        stdin.channel.shutdown_write()
+        out = stdout.read().decode(errors="replace").strip()
+        err = stderr.read().decode(errors="replace").strip()
+        for line in (out.splitlines() + err.splitlines()):
+            if line.strip():
+                self.log(line, "detail")
+        return stdout.channel.recv_exit_status() == 0
+
+    @staticmethod
+    def _devtools_answers(client: paramiko.SSHClient, port: int) -> bool:
+        probe: List[str] = []
+        run_command(
+            client,
+            f"curl -sS --connect-timeout 2 --max-time 3 http://127.0.0.1:{port}/json/version 2>/dev/null || true",
+            on_line=probe.append,
+        )
+        return any("webSocketDebuggerUrl" in l for l in probe)
+
+    def enable_matrix_app_debugging(self, room: Room) -> bool:
+        """Enable Chrome DevTools on the Matrix App (Electron kiosk) over SSH:
+        inject ``--remote-debugging-*`` flags into the launcher (backing it up
+        first) and relaunch the app through the room's active sway session,
+        then poll until the CDP endpoint answers. Ported from the matrix-lab
+        extension's ``enableMatrixAppDebugger``. Requires the sudo password."""
+        conn = self.config.connection
+        port = conn.matrix_app_debug_port
+        launcher = conn.matrix_app_launcher_path
+        self.log(f"=== OR {room.number}: Enabling Matrix App remote debugging ===", "info")
+        if not self.creds.sudo_password:
+            self.log("A sudo password is required to relaunch the Matrix App.", "error")
+            return False
+
+        flags = f"--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}"
+        marker = f"--remote-debugging-port={port}"
+        script = "\n".join(self._matrix_app_session_script(launcher) + [
+            f"if grep -Fq -- {shlex.quote(marker)} \"$launcher\"; then echo 'DevTools flags already present.'; else",
+            '  backup="${launcher}.matrix-deploy.bak.$(date +%Y%m%d%H%M%S)"',
+            '  cp -- "$launcher" "$backup"',
+            f"  sed -i 's|--ozone-platform=wayland|--ozone-platform=wayland {flags}|' \"$launcher\"",
+            f"  if ! grep -Fq -- {shlex.quote(marker)} \"$launcher\"; then mv -- \"$backup\" \"$launcher\"; echo 'Could not add flags; launcher restored.' >&2; exit 7; fi",
+            '  echo "DevTools flags added. Backup: $backup"',
+            "fi",
+        ] + self._matrix_app_relaunch_script(port))
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+
+        def _devtools_ready() -> bool:
+            return self._devtools_answers(client, port)
+
+        try:
+            self._begin(2)
+
+            # Don't kill/relaunch a working kiosk: if DevTools already answers,
+            # we're done (re-running Enable otherwise restarts the app and can
+            # hang while it comes back).
+            if _devtools_ready():
+                self.log(f"OR {room.number}: Matrix App DevTools already enabled on port {port}.", "success")
+                self._advance()
+                self._advance()
+                return True
+
+            if not self._run_sudo_script(client, script):
+                self.log("Failed to enable Matrix App debugging.", "error")
+                return False
+            self._advance()
+
+            self.log("Waiting for Chrome DevTools to come up (up to ~40s)...", "detail")
+            for attempt in range(20):
+                if self.is_cancelled():
+                    return False
+                if _devtools_ready():
+                    self.log(f"OR {room.number}: Matrix App DevTools ready on port {port}.", "success")
+                    self._advance()
+                    return True
+                if attempt and attempt % 3 == 0:
+                    self.log(f"  still waiting for DevTools... ({attempt * 2}s)", "detail")
+                time.sleep(1)
+            self.log(
+                f"Relaunched, but DevTools did not become ready on port {port}. "
+                "The kiosk may still be starting - wait a moment and try View Matrix App.",
+                "error",
+            )
+            return False
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def disable_matrix_app_debugging(self, room: Room) -> bool:
+        """Undo ``enable_matrix_app_debugging``: strip the
+        ``--remote-debugging-*`` flags from the launcher (backing it up first)
+        and relaunch the Matrix App so the DevTools port closes. Leaves the
+        app alone if the flags are absent and the port is already closed.
+        Requires the sudo password."""
+        conn = self.config.connection
+        port = conn.matrix_app_debug_port
+        self.log(f"=== OR {room.number}: Disabling Matrix App remote debugging ===", "info")
+        if not self.creds.sudo_password:
+            self.log("A sudo password is required to relaunch the Matrix App.", "error")
+            return False
+
+        script = "\n".join(self._matrix_app_session_script(conn.matrix_app_launcher_path) + [
+            "if grep -Fq -- '--remote-debugging-port' \"$launcher\"; then",
+            '  backup="${launcher}.matrix-deploy.bak.$(date +%Y%m%d%H%M%S)"',
+            '  cp -- "$launcher" "$backup"',
+            "  sed -i -E 's/ --remote-debugging-(address|port)=[0-9.]*//g' \"$launcher\"",
+            "  if grep -Fq -- '--remote-debugging-port' \"$launcher\"; then mv -- \"$backup\" \"$launcher\"; echo 'Could not remove flags; launcher restored.' >&2; exit 7; fi",
+            '  echo "DevTools flags removed. Backup: $backup"',
+            f"elif ! ss -ltnH 'sport = :{port}' 2>/dev/null | grep -q .; then",
+            "  echo 'Remote debugging is already off.'; exit 0",
+            "fi",
+        ] + self._matrix_app_relaunch_script(port))
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(2)
+            if not self._run_sudo_script(client, script):
+                self.log("Failed to disable Matrix App debugging.", "error")
+                return False
+            self._advance()
+            for _ in range(10):
+                if self.is_cancelled():
+                    return False
+                if not self._devtools_answers(client, port):
+                    self.log(f"OR {room.number}: Matrix App remote debugging is off.", "success")
+                    self._advance()
+                    return True
+                time.sleep(1)
+            self.log(f"DevTools is still answering on port {port} - the old app may not have exited.", "error")
+            return False
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def export_support_bundle(
+        self,
+        room: Room,
+        dest_dir: Path,
+        skip_nms: bool = False,
+        skip_intel: bool = False,
+    ) -> Optional[Path]:
+        """Run the room's built-in ``get-support`` collector (the same tool
+        that produces the official SynergyLogs support bundle: matrix
+        diagnostics, room configuration, the encrypted NMS support bundle,
+        act-intel-diag output and the full systemd journal), then download the
+        resulting ``.zip``. Requires the sudo password."""
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Collecting support bundle (get-support) ===", "info")
+        if not self.creds.sudo_password:
+            self.log("A sudo password is required to run the device collector.", "error")
+            return None
+
+        # Write to a persistent per-run dir on the room (NOT /tmp - the
+        # uncompressed journal is too big for the RAM-backed tmpfs, per
+        # get-support's own guidance).
+        remote_dir = f"/home/{conn.ssh_username}/matrix-deploy-support"
+        get_cmd = ["get-support", "--output", shlex.quote(remote_dir), "-v"]
+        if skip_nms:
+            get_cmd.append("--skip-nms")
+        if skip_intel:
+            get_cmd.append("--skip-intel-diag")
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return None
+        try:
+            self._begin(2)
+            run_command(client, f"mkdir -p {shlex.quote(remote_dir)}")
+            self.log("Running device collector - this can take a few minutes...", "detail")
+
+            # Feed the sudo password via a pipe (echo | sudo -S), NOT a PTY -
+            # with a PTY sudo prompts on the terminal, echoes the password and
+            # ignores stdin. ``-v`` progress goes to stderr, so merge 2>&1 and
+            # stream every line; the final .zip path is printed on stdout.
+            full_cmd = f"{self._sudo_prefix()} {' '.join(get_cmd)} 2>&1"
+            zip_remote: Optional[str] = None
+            zip_re = re.compile(r"(/\S+\.zip)")
+
+            def _on_line(line: str) -> None:
+                nonlocal zip_remote
+                line = line.strip()
+                if not line:
+                    return
+                self.log(line, "detail")
+                m = zip_re.search(line)
+                if m and m.group(1).endswith(".zip"):
+                    zip_remote = m.group(1)  # keep the last .zip seen
+
+            exit_status = run_command(client, full_cmd, on_line=_on_line)
+            if exit_status != 0:
+                # get-support returns non-zero (e.g. 2) when some artifacts are
+                # missing - typically the NMS bundle if barco-nms is down - but
+                # it still produces a usable bundle. Warn and download it; the
+                # collection_report.txt inside documents what was skipped.
+                self.log(
+                    f"get-support reported missing artifacts (exit {exit_status}); "
+                    "downloading the partial bundle anyway (see collection_report.txt).",
+                    "warning",
+                )
+            self._advance()
+
+            if not zip_remote:
+                # Fall back to the newest .zip in the output dir.
+                found: List[str] = []
+                run_command(
+                    client,
+                    f"ls -1t {shlex.quote(remote_dir)}/*.zip 2>/dev/null | head -1",
+                    on_line=found.append,
+                )
+                zip_remote = found[0].strip() if found else None
+            if not zip_remote:
+                self.log("Could not determine the produced bundle path.", "error")
+                return None
+
+            # get-support runs as root, so the ZIP is root-owned; make it
+            # readable by the SSH user before pulling it down via SCP.
+            run_command(client, f"{self._sudo_prefix()} chmod a+r {shlex.quote(zip_remote)}")
+
+            self.log(f"Downloading {zip_remote} ...", "detail")
+            dest_dir = Path(dest_dir)
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            local = dest_dir / f"or{room.number}-{Path(zip_remote).name}"
+            try:
+                download_file(client, zip_remote, str(local), self.progress, self.log)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Download failed: {exc}", "error")
+                return None
+            # Clean up the staging dir + archive on the room (root-owned; sudo).
+            run_command(client, f"{self._sudo_prefix()} rm -rf {shlex.quote(remote_dir)}")
+            self._advance()
+
+            # List what's inside so the operator can confirm completeness.
+            try:
+                import zipfile
+                with zipfile.ZipFile(local) as zf:
+                    names = zf.namelist()
+                size_mb = local.stat().st_size / (1024 * 1024)
+                self.log(f"Bundle contents ({len(names)} entries, {size_mb:.1f} MB):", "detail")
+                for name in names:
+                    self.log(f"  - {name}", "detail")
+            except Exception as exc:  # noqa: BLE001 - listing is best-effort
+                self.log(f"(Could not list bundle contents: {exc})", "warning")
+
+            self.log(f"OR {room.number}: support bundle saved to {local}", "success")
+            return local
+        finally:
             try:
                 client.close()
             except Exception:  # noqa: BLE001
@@ -857,7 +1110,7 @@ class Deployer:
         correlated with whatever service issue it triggered instead of
         needing a second, separate lookup.
         """
-        self.log(f"=== OR {room.number}: System Errors (last {hours}h) ===", "info")
+        self.log(f"=== OR {room.number}: System Errors (last {self._since_label(hours)}) ===", "info")
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -881,7 +1134,7 @@ class Deployer:
             self._advance()
             if not out_lines:
                 self.log(
-                    f"OR {room.number}: no errors in the last {hours}h.",
+                    f"OR {room.number}: no errors in the last {self._since_label(hours)}.",
                     "success",
                 )
                 return True
@@ -985,7 +1238,7 @@ class Deployer:
                 collected.append(line)
                 self.log(line, "detail")
 
-            exit_status = run_command(client, cmd, get_pty=True, on_line=_on_line)
+            exit_status = run_command(client, cmd, on_line=_on_line)
             self._advance()
             if exit_status != 0:
                 self.log("Failed to read config file.", "error")
@@ -999,6 +1252,83 @@ class Deployer:
                 dest.write_text("\n".join(collected) + "\n", encoding="utf-8")
                 self.log(f"Saved raw config copy to {dest}", "success")
 
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def read_matrix_config_text(self, room: Room) -> Optional[str]:
+        """Return the raw text of the room's matrix.api.config.json for live
+        editing (no JSON re-formatting). Returns ``None`` on failure."""
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Loading {conn.remote_config_path} ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return None
+        try:
+            self._begin(1)
+            prefix = self._read_sudo_prefix()
+            cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
+            collected: List[str] = []
+            exit_status = run_command(client, cmd, on_line=collected.append)
+            self._advance()
+            if exit_status != 0:
+                self.log("Failed to read config file.", "error")
+                return None
+            raw = "\n".join(collected)
+            if not raw.strip():
+                self.log("Config file read returned no output.", "error")
+                return None
+            self.log(f"OR {room.number}: config loaded ({len(raw)} bytes).", "success")
+            return raw
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def deploy_matrix_config_text(self, room: Room, content: str) -> bool:
+        """Validate ``content`` as JSON, upload it verbatim to the room, apply
+        it to the remote config path, and restart matrix-api. Used by the live
+        config editor (replaces the golden-template config generation flow)."""
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Deploying edited config ===", "info")
+        try:
+            json.loads(content)
+        except json.JSONDecodeError as exc:
+            self.log(f"Refusing to deploy invalid JSON: {exc}", "error")
+            return False
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(2)
+            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-edited.json"
+            # Preserve the user's exact text (trailing newline for POSIX tools).
+            local_tmp.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
+
+            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
+            self.log("Uploading edited config...", "detail")
+            try:
+                upload_file(client, str(local_tmp), remote_staging)
+            except Exception as exc:  # noqa: BLE001
+                self.log(f"Config upload failed: {exc}", "error")
+                return False
+            self._advance()  # uploaded
+
+            self.log("Applying config and restarting matrix-api...", "detail")
+            if not self._apply_config_and_restart_service(client, room):
+                self.log("Config apply failed (service restart failed).", "error")
+                return False
+            self._advance()  # applied
+            self.log(f"OR {room.number}: edited config deployed and matrix-api restarted.", "success")
             return True
         finally:
             try:
@@ -1032,9 +1362,7 @@ class Deployer:
             prefix = self._read_sudo_prefix()
             cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
             collected: List[str] = []
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=collected.append
-            )
+            exit_status = run_command(client, cmd, on_line=collected.append)
             if exit_status != 0:
                 self.log("Failed to read config file.", "error")
                 return False
@@ -1110,9 +1438,7 @@ class Deployer:
         prefix = self._read_sudo_prefix()
         cmd = f"{prefix} cat {shlex.quote(conn.remote_config_path)}".strip()
         collected: List[str] = []
-        exit_status = run_command(
-            client, cmd, get_pty=True, on_line=collected.append
-        )
+        exit_status = run_command(client, cmd, on_line=collected.append)
         if exit_status != 0:
             self.log("Failed to read config file.", "error")
             return None
@@ -1156,6 +1482,130 @@ class Deployer:
             self.log("Config apply failed (service restart failed).", "error")
             return False
         return True
+
+    @staticmethod
+    def format_config_path(path: List[Any]) -> str:
+        out = ""
+        for key in path:
+            out += f"[{key}]" if isinstance(key, int) else (f".{key}" if out else str(key))
+        return out
+
+    @staticmethod
+    def _apply_config_change(data: Any, change: Dict[str, Any]) -> Optional[bool]:
+        """Apply one ``{"op", "path", "value"}`` change to ``data`` in place.
+        ``set``/``delete`` target the field at ``path``; ``add_item`` /
+        ``remove_item`` add or remove ``value`` in the list at ``path`` (so a
+        room's other list entries are kept). Returns True if something
+        changed, False if it was already in the desired state, or None if the
+        path doesn't fit this room's config (missing index, type mismatch)."""
+        path, op = change["path"], change["op"]
+        parent = data
+        for key in path[:-1]:
+            if isinstance(parent, dict) and isinstance(key, str):
+                if key not in parent:
+                    if op in ("delete", "remove_item"):
+                        return False
+                    parent[key] = {}
+                parent = parent[key]
+            elif isinstance(parent, list) and isinstance(key, int) and 0 <= key < len(parent):
+                parent = parent[key]
+            else:
+                return None
+        last = path[-1]
+        if op in ("add_item", "remove_item"):
+            if not (isinstance(parent, dict) and isinstance(last, str)):
+                return None
+            items = parent.get(last, _MISSING)
+            if items is _MISSING:
+                if op == "remove_item":
+                    return False
+                items = parent[last] = []
+            if not isinstance(items, list):
+                return None
+            value = change.get("value")
+            if op == "add_item":
+                if value in items:
+                    return False
+                items.append(value)
+                return True
+            if value not in items:
+                return False
+            parent[last] = [v for v in items if v != value]
+            return True
+        if isinstance(parent, dict) and isinstance(last, str):
+            if op == "delete":
+                return parent.pop(last, _MISSING) is not _MISSING
+            if last in parent and parent[last] == change.get("value"):
+                return False
+            parent[last] = change.get("value")
+            return True
+        if isinstance(parent, list) and isinstance(last, int) and 0 <= last < len(parent):
+            if op == "delete":
+                return None  # index deletes would shift other entries; not supported
+            if parent[last] == change.get("value"):
+                return False
+            parent[last] = change.get("value")
+            return True
+        return None
+
+    def patch_matrix_config(self, room: Room, changes: List[Dict[str, Any]]) -> bool:
+        """Apply field-level ``changes`` (from the config editor's diff) to
+        this room's OWN matrix.api.config.json, leaving every other field -
+        including room-specific values - untouched, then push and restart
+        matrix-api. Nothing is pushed if any change doesn't fit this room's
+        config, or if the room already has every value (no needless restart)."""
+        self.log(f"=== OR {room.number}: Applying {len(changes)} config change(s) ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(2)
+            data = self._read_remote_matrix_config(client)
+            if data is None:
+                return False
+            self._advance()  # read
+
+            changed = 0
+            for change in changes:
+                label = self.format_config_path(change["path"])
+                result = self._apply_config_change(data, change)
+                if result is None:
+                    self.log(
+                        f"OR {room.number}: '{label}' doesn't exist in the same shape on this room - "
+                        "skipped the room, nothing was changed.",
+                        "error",
+                    )
+                    return False
+                if result:
+                    changed += 1
+                    value = json.dumps(change.get("value"))
+                    what = {"delete": "removed", "add_item": f"+ {value}", "remove_item": f"- {value}"}.get(
+                        change["op"], f"= {value}"
+                    )
+                    self.log(f"  {label} {what}", "detail")
+                else:
+                    self.log(f"  {label} already up to date", "detail")
+
+            if not changed:
+                self.log(f"OR {room.number}: already matches - no push, no restart.", "success")
+                self._advance()
+                return True
+            if not self._upload_and_apply_matrix_config(
+                client, room, data, f"or{room.number}-patched.json"
+            ):
+                return False
+            self._advance()  # applied
+            self.log(
+                f"OR {room.number}: {changed} change(s) applied and matrix-api restarted.", "success"
+            )
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _merge_trusted_endpoints(
         self, room: Room, endpoints: List[str], context: str
@@ -1686,6 +2136,190 @@ class Deployer:
 
         self.log(f"OR {room.number}: fingerprint entry removed (if it existed).", "success")
         return True
+
+    # -- Web app (Matrix Electron web app + matrix.api backend) -----------
+    # Ported from the standalone matrix-electron-web-deployer tool: deploys
+    # locally-built artifacts (see webapp_builder.build_repo for the build
+    # step) rather than an SWU, and targets the same room/router topology.
+
+    def deploy_web_app(self, room: Room, local_dist: Path, local_web: Path) -> bool:
+        """Deploy locally-built backend dist + web assets to a room over SSH:
+        upload, install under the app folder + node_modules, patch the
+        systemd unit and matrix.api.config.json to point at the new dist
+        build, then restart matrix-api."""
+        conn = self.config.connection
+        local_dist = Path(local_dist)
+        local_web = Path(local_web)
+        self.log(f"=== OR {room.number}: Web app deploy ===", "info")
+        if not local_dist.exists():
+            self.log(f"Local backend dist not found: {local_dist}", "error")
+            return False
+        if not local_web.exists():
+            self.log(f"Local web assets not found: {local_web}", "error")
+            return False
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+
+        remote_tmp = f"/tmp/or{room.number}-webapp-upgrade"
+        try:
+            self._begin(4)
+            run_command(client, f"rm -rf {shlex.quote(remote_tmp)}")
+            run_command(client, f"mkdir -p {shlex.quote(remote_tmp)}")
+
+            self.log("Uploading web assets...", "detail")
+            upload_dir(client, str(local_web), f"{remote_tmp}/web", self.log)
+            self._advance()  # web assets uploaded
+
+            self.log("Uploading backend dist...", "detail")
+            upload_dir(client, str(local_dist), f"{remote_tmp}/dist", self.log)
+            self._advance()  # backend dist uploaded
+
+            self.log("Installing files and patching config...", "detail")
+            app_folder = conn.remote_webapp_app_folder
+            node_module = conn.remote_webapp_node_module
+            install_cmd = (
+                f"mkdir -p {app_folder}/dist && "
+                f"rm -rf {app_folder}/dist/arthrex-synergy-matrix && "
+                f"cp -r {remote_tmp}/web {app_folder}/dist/arthrex-synergy-matrix && "
+                f"chmod -R 755 {app_folder}/ && "
+                f"rm -rf {node_module}/dist && "
+                f"cp -r {remote_tmp}/dist {node_module}/dist && "
+                f"chmod -R 755 {node_module}/dist/ && "
+                f"sed -i 's|index.js|dist/server.js|g' {conn.webapp_service_unit_path} && "
+                f"sed -i 's|\"appFolder\": \"{app_folder}\"|\"appFolder\": \"{app_folder}/dist/arthrex-synergy-matrix\"|g' {conn.remote_config_path} && "
+                f"sed -i 's|\"helpFolder\": \"{app_folder}\"|\"helpFolder\": \"{app_folder}/dist/arthrex-synergy-matrix\"|g' {conn.remote_config_path} && "
+                f"sed -i 's|https://localhost:|https://{conn.router_ip}:|g' {conn.remote_config_path} && "
+                f"systemctl daemon-reload && "
+                f"rm -rf {remote_tmp}"
+            )
+            sudo = self._sudo_prefix()
+            exit_status = run_command(
+                client, f"{sudo} bash -lc {shlex.quote(install_cmd)}", get_pty=True,
+                on_line=lambda l: self.log(l, "detail"),
+            )
+            self._advance()  # installed/patched
+            if exit_status != 0:
+                self.log("Install/patch step failed.", "error")
+                return False
+
+            self.log("Restarting matrix-api...", "detail")
+            if not self._restart_service(client, room, conn.service_name):
+                self.log("Service restart failed.", "error")
+                return False
+            self._advance()  # restarted
+
+            self.log(
+                f"OR {room.number}: web app deployed. "
+                f"Test: https://{conn.router_ip}:100{room.number:02d}/app/",
+                "success",
+            )
+            return True
+        finally:
+            run_command(client, f"rm -rf {shlex.quote(remote_tmp)}")
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def reset_web_app(self, room: Room) -> bool:
+        """Undo a previous web app deploy: remove staged/deployed files and
+        flip the systemd unit back to the original entrypoint (index.js), so
+        the room is ready for a fresh deploy."""
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Web app reset ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(2)
+            sudo = self._sudo_prefix()
+
+            cleanup_cmd = (
+                f"rm -rf /tmp/or{room.number}-* /tmp/v14-dist-fix-* /tmp/matrix-* "
+                f"{conn.remote_webapp_app_folder}/* && echo CLEANUP_OK"
+            )
+            cleanup_out: List[str] = []
+            run_command(
+                client, f"{sudo} bash -lc {shlex.quote(cleanup_cmd)}", get_pty=True,
+                on_line=cleanup_out.append,
+            )
+            self.log("\n".join(cleanup_out), "detail")
+            self._advance()  # cleaned up
+            if not any("CLEANUP_OK" in l for l in cleanup_out):
+                self.log("Cleanup may have failed.", "warning")
+
+            service_cmd = (
+                f"sed -i 's|dist/server.js|index.js|g' {conn.webapp_service_unit_path} && "
+                f"systemctl daemon-reload && echo SERVICE_RESET_OK"
+            )
+            service_out: List[str] = []
+            run_command(
+                client, f"{sudo} bash -lc {shlex.quote(service_cmd)}", get_pty=True,
+                on_line=service_out.append,
+            )
+            self.log("\n".join(service_out), "detail")
+            self._advance()  # service reset
+            if not any("SERVICE_RESET_OK" in l for l in service_out):
+                self.log("Systemd service reset may have failed.", "warning")
+
+            self.log(f"OR {room.number}: web app reset complete; ready for a fresh deploy.", "success")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def diagnose_web_app(self, room: Room) -> bool:
+        """Read-only diagnostic dump for the deployed web assets: directory
+        listings, matrix.api.config.json appFolder/helpFolder, matrix-api
+        service status/journal, and AppArmor denials."""
+        conn = self.config.connection
+        self.log(f"=== OR {room.number}: Web app diagnostics ===", "info")
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            prefix = self._read_sudo_prefix()
+            web_root = f"{conn.remote_webapp_app_folder}/dist/arthrex-synergy-matrix"
+            sections = [
+                ("Web assets root listing", f"ls -la {shlex.quote(web_root)}/"),
+                ("app/ subfolder listing", f"ls -la {shlex.quote(web_root)}/app/ 2>&1"),
+                ("Recursive tree (depth-limited)",
+                 f"find {shlex.quote(web_root)} -maxdepth 3 -exec ls -ld {{}} \\;"),
+                ("matrix.api.config.json appFolder/helpFolder",
+                 f"grep -E 'appFolder|helpFolder' {shlex.quote(conn.remote_config_path)}"),
+                ("matrix-api service status",
+                 f"systemctl status {shlex.quote(conn.service_name)} --no-pager -l | head -20"),
+                ("matrix-api recent journal (last 60 lines)",
+                 f"{prefix} journalctl -u {shlex.quote(conn.service_name)} -n 60 --no-pager".strip()),
+                ("AppArmor status", f"{prefix} aa-status 2>&1 | head -30".strip()),
+                ("Recent AppArmor DENIED entries (dmesg)",
+                 f"{prefix} dmesg 2>&1 | grep -i apparmor | tail -30".strip()),
+            ]
+            out_lines: List[str] = []
+            for title, cmd in sections:
+                lines: List[str] = []
+                run_command(client, cmd, get_pty=True, on_line=lines.append)
+                out_lines.append(f"OR {room.number}: --- {title} ---")
+                out_lines.extend(f"OR {room.number}: {line}" for line in lines)
+            self._advance()
+            self.log("\n".join(out_lines), "detail")
+            return True
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _sudo_prefix(self) -> str:
         """Return a sudo invocation that supplies the password when available."""

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-from typing import Dict
+from typing import Dict, Tuple
 
 
 # Recognized non-secret keys and the settings field they map to.
@@ -21,14 +21,19 @@ NON_SECRET_KEY_MAP = {
     "ARTIFACTORY_EMAIL": "artifactory_email",
     "JENKINS_USERNAME": "jenkins_username",
     "SWU_FILE": "swu_file",
-    "CONFIG_TEMPLATE": "config_file",
+    "BACKEND_REPO": "backend_repo",
+    "WEB_REPO": "web_repo",
 }
 
 # Secret keys and the field they map to. Loaded into the GUI but never written
-# to the persisted settings file.
+# to the persisted settings file. ``MATRIX_*`` aliases match the per-lab
+# credential files exported by the Matrix Lab VS Code extension
+# (e.g. qa1lab.env / qa2lab.env) so those can be used verbatim as profile envs.
 SECRET_KEY_MAP = {
     "SSH_PASSWORD": "ssh_password",
+    "MATRIX_SSH_PASSWORD": "ssh_password",
     "SUDO_PASSWORD": "sudo_password",
+    "MATRIX_SUDO_PASSWORD": "sudo_password",
     # ARTIFACTORY_API_KEY is an accepted alias for ARTIFACTORY_TOKEN.
     "ARTIFACTORY_TOKEN": "artifactory_token",
     "ARTIFACTORY_API_KEY": "artifactory_token",
@@ -41,20 +46,23 @@ ENV_KEY_MAP = {**NON_SECRET_KEY_MAP, **SECRET_KEY_MAP}
 def default_env_path() -> Path:
     """Return the default ``.env`` location.
 
-    When frozen, prefer a .env next to the executable so it can be edited
-    after packaging.
+    When frozen this is next to the executable (never inside the bundle), so
+    it can be edited and saved to after packaging.
     """
     if getattr(sys, "frozen", False):
-        exe_dir = Path(sys.executable).resolve().parent
-        candidate = exe_dir / ".env"
-        if candidate.exists():
-            return candidate
-        bundle_dir = Path(getattr(sys, "_MEIPASS", exe_dir))
-        bundled = bundle_dir / ".env"
-        if bundled.exists():
-            return bundled
-        return candidate
+        return Path(sys.executable).resolve().parent / ".env"
     return Path(__file__).resolve().parent.parent / ".env"
+
+
+def profile_env_path(profile_path) -> Path:
+    """Return the sibling ``<stem>.env`` for a given profile JSON path.
+
+    e.g. ``config/qa2lab.json`` -> ``config/qa2lab.env``. Lets each site/lab
+    profile carry its own credential file (matching the Matrix Lab extension's
+    per-lab env files) instead of one shared ``.env``.
+    """
+    p = Path(profile_path)
+    return p.with_suffix(".env")
 
 
 def _strip_quotes(value: str) -> str:
@@ -72,7 +80,8 @@ def parse_env_file(path: Path) -> Dict[str, str]:
     """
     result: Dict[str, str] = {}
     try:
-        text = path.read_text(encoding="utf-8")
+        # utf-8-sig: tolerate a BOM (Notepad / PowerShell 5 Set-Content).
+        text = path.read_text(encoding="utf-8-sig")
     except OSError:
         return result
 
@@ -95,10 +104,53 @@ def parse_env_file(path: Path) -> Dict[str, str]:
 def _collect(raw: Dict[str, str], key_map: Dict[str, str]) -> Dict[str, str]:
     settings: Dict[str, str] = {}
     for env_key, field_name in key_map.items():
-        value = raw.get(env_key, "").strip()
-        if value:
+        value = raw.get(env_key, "")
+        if value.strip():
             settings[field_name] = value
     return settings
+
+
+def _format_env_value(value: str) -> str:
+    """Quote only when the parser would otherwise alter the value (edge
+    whitespace, or a value that already looks quoted)."""
+    looks_quoted = len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"')
+    if value == value.strip() and not looks_quoted:
+        return value
+    quote = '"' if '"' not in value else "'"
+    return f"{quote}{value}{quote}"
+
+
+def save_env_values(path: Path, values: Dict[str, str]) -> None:
+    """Write field values (``ssh_password``, ``artifactory_email``, ...) into
+    the .env at ``path``, creating it if needed. An existing line for the
+    field - under any accepted alias, e.g. ``MATRIX_SSH_PASSWORD`` - is
+    updated in place; everything else in the file is left untouched. Empty
+    values are skipped (they never erase a saved value)."""
+    pending = {f: v for f, v in values.items() if v}
+    if not pending:
+        return
+    path = Path(path)
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        lines = []
+    written = set()
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key = line[len("export "):] if line.startswith("export ") else line
+        key = key.partition("=")[0].strip()
+        field_name = ENV_KEY_MAP.get(key)
+        if field_name in pending:
+            lines[i] = f"{key}={_format_env_value(pending[field_name])}"
+            written.add(field_name)
+    canonical = {field_name: key for key, field_name in reversed(list(ENV_KEY_MAP.items()))}
+    for field_name, value in pending.items():
+        if field_name not in written:
+            lines.append(f"{canonical[field_name]}={_format_env_value(value)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def load_env_settings(path: Path | None = None) -> Dict[str, str]:
@@ -109,6 +161,27 @@ def load_env_settings(path: Path | None = None) -> Dict[str, str]:
     """
     raw = parse_env_file(path or default_env_path())
     return _collect(raw, NON_SECRET_KEY_MAP)
+
+
+def active_env_paths(profile_path=None) -> Tuple[Path, Path]:
+    """``(root_env, profile_env)`` for a profile: the shared root ``.env`` and
+    the profile's sibling ``<stem>.env`` if it exists (else the root again)."""
+    root = default_env_path()
+    if profile_path:
+        sib = profile_env_path(profile_path)
+        if sib.exists():
+            return root, sib
+    return root, root
+
+
+def load_merged_env(profile_path=None) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """``(settings, secrets)`` from the root ``.env`` overlaid with the
+    profile's sibling ``.env`` (profile wins where both set a value)."""
+    root, profile = active_env_paths(profile_path)
+    return (
+        {**load_env_settings(root), **load_env_settings(profile)},
+        {**load_env_secrets(root), **load_env_secrets(profile)},
+    )
 
 
 def load_env_secrets(path: Path | None = None) -> Dict[str, str]:

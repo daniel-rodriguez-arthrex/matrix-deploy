@@ -915,14 +915,6 @@ class MatrixDeployWindow(QMainWindow):
         self.build_btn.clicked.connect(self._trigger_build)
         layout.addWidget(self.build_btn, 0, 4)
 
-        layout.addWidget(QLabel("Config Template:"), 1, 0)
-        self.config_file_input = QLineEdit()
-        self.config_file_input.setPlaceholderText("Select base config JSON template...")
-        layout.addWidget(self.config_file_input, 1, 1)
-        cfg_browse = self._make_button("Browse...", "utility", icon=QStyle.SP_DirOpenIcon)
-        cfg_browse.clicked.connect(self._browse_config)
-        layout.addWidget(cfg_browse, 1, 2)
-
         group.setLayout(layout)
         return group
 
@@ -1008,15 +1000,6 @@ class MatrixDeployWindow(QMainWindow):
 
     def _build_options_row(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addWidget(QLabel("Operation:"))
-        self.operation_combo = QComboBox()
-        self.operation_combo.addItems(
-            ["SWU Update Only", "Config Update Only", "Both (SWU + Config)"]
-        )
-        self.operation_combo.setCurrentIndex(2)
-        self.operation_combo.setMinimumWidth(190)
-        row.addWidget(self.operation_combo)
-
         row.addWidget(QLabel("Concurrency:"))
         self.concurrency_combo = QComboBox()
         self.concurrency_combo.addItems([label for label, _ in CONCURRENCY_OPTIONS])
@@ -1168,6 +1151,15 @@ class MatrixDeployWindow(QMainWindow):
         )
         self.add_trusted_endpoint_btn.clicked.connect(self._add_trusted_endpoint)
 
+        self.add_trusted_endpoint_btn2 = self._make_button(
+            "Trust 10.109.64.144",
+            "service",
+            "Add 10.109.64.144 to apiServer.trustedEndPoints in "
+            "matrix.api.config.json and restart matrix-api on selected rooms",
+            icon=QStyle.SP_FileDialogDetailedView,
+        )
+        self.add_trusted_endpoint_btn2.clicked.connect(self._add_trusted_endpoint_2)
+
         self.web_app_config_btn = self._make_button(
             "Web App Configuration",
             "service",
@@ -1192,6 +1184,7 @@ class MatrixDeployWindow(QMainWindow):
                 self.shutdown_btn,
                 self.log_debug_btn,
                 self.add_trusted_endpoint_btn,
+                self.add_trusted_endpoint_btn2,
                 self.web_app_config_btn,
             ],
             columns=2,
@@ -1667,14 +1660,6 @@ class MatrixDeployWindow(QMainWindow):
         if path:
             self.swu_file_input.setText(path)
 
-    def _browse_config(self) -> None:
-        start = str(Path.home() / "Downloads")
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select Config Template", start, "JSON Files (*.json)"
-        )
-        if path:
-            self.config_file_input.setText(path)
-
     def _set_all_rooms(self, checked: bool) -> None:
         for cb in self.room_checkboxes.values():
             cb.setChecked(checked)
@@ -1865,27 +1850,12 @@ class MatrixDeployWindow(QMainWindow):
             QMessageBox.warning(self, "No Rooms", "Select at least one operating room.")
             return
 
-        op = self.operation_combo.currentText()
-        do_swu = "SWU" in op
-        do_config = "Config" in op
-
+        op = "SWU Update"
         swu_file = Path(self.swu_file_input.text()) if self.swu_file_input.text() else None
-        template = Path(self.config_file_input.text()) if self.config_file_input.text() else None
 
-        if do_swu and (not swu_file or not swu_file.exists()):
+        if not swu_file or not swu_file.exists():
             QMessageBox.warning(self, "Missing SWU", "Select a valid SWU file.")
             return
-        if do_config:
-            if not template or not template.exists():
-                QMessageBox.warning(self, "Missing Template", "Select a valid config template.")
-                return
-            if not self.sudo_password_input.text():
-                QMessageBox.warning(
-                    self,
-                    "Missing Sudo Password",
-                    "Sudo password is required to run act-mfg-eeprom display on the room.",
-                )
-                return
 
         busy = [r for r in rooms if r.number in self._busy_rooms]
         if busy:
@@ -1924,11 +1894,8 @@ class MatrixDeployWindow(QMainWindow):
             config=self.config,
             creds=creds,
             rooms=rooms,
-            do_swu=do_swu,
-            do_config=do_config,
+            do_swu=True,
             swu_file=swu_file,
-            template_path=template,
-            output_dir=Path.home() / "Downloads",
             sequential=sequential,
             max_concurrency=max_concurrency,
         )
@@ -2094,6 +2061,13 @@ class MatrixDeployWindow(QMainWindow):
             "add_trusted_endpoint",
             "Trust 192.168.1.68",
             trusted_endpoint="192.168.1.68",
+        )
+
+    def _add_trusted_endpoint_2(self) -> None:
+        self._run_system_action(
+            "add_trusted_endpoint",
+            "Trust 10.109.64.144",
+            trusted_endpoint="10.109.64.144",
         )
 
     def _configure_web_app(self) -> None:
@@ -2280,7 +2254,6 @@ class MatrixDeployWindow(QMainWindow):
         self.router_ip_input.setText(data.get("router_ip", self.config.connection.router_ip))
         self.username_input.setText(data.get("username", self.config.connection.ssh_username))
         self.swu_file_input.setText(data.get("swu_file", ""))
-        self.config_file_input.setText(data.get("config_file", ""))
         self.artifactory_email_input.setText(data.get("artifactory_email", ""))
         self.jenkins_username_input.setText(data.get("jenkins_username", ""))
 
@@ -2301,7 +2274,6 @@ class MatrixDeployWindow(QMainWindow):
             "router_ip": self.router_ip_input.text(),
             "username": self.username_input.text(),
             "swu_file": self.swu_file_input.text(),
-            "config_file": self.config_file_input.text(),
             "artifactory_email": self.artifactory_email_input.text(),
             "jenkins_username": self.jenkins_username_input.text(),
             # Passwords and tokens are intentionally NOT persisted.

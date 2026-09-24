@@ -37,7 +37,12 @@ class ArtifactoryClient:
         resp.raise_for_status()
         return resp
 
-    def find_latest_swu(self, log: Optional[Logger] = None) -> str:
+    def find_latest_swu(
+        self,
+        log: Optional[Logger] = None,
+        build_path: Optional[str] = None,
+        branch_filter: Optional[str] = None,
+    ) -> str:
         """Return the latest .swu path relative to ``build_path``.
 
         Lists the repo folder (``repo/build_path``) recursively via the
@@ -45,8 +50,14 @@ class ArtifactoryClient:
         ``lastModified``. If ``branch_filter`` is set, only files whose path
         contains that token are considered (falling back to all ``.swu`` files
         if the filter excludes everything).
+
+        ``build_path``/``branch_filter`` override the configured defaults,
+        allowing a specific build source (e.g. wrynose vs MatrixG2-2.0) to be
+        selected at download time.
         """
-        base = f"{self.config.repo}/{self.config.build_path}".strip("/")
+        build_path = build_path or self.config.build_path
+        branch_filter = branch_filter if branch_filter is not None else self.config.branch_filter
+        base = f"{self.config.repo}/{build_path}".strip("/")
         url = f"{self.config.url}/api/storage/{base}?list&deep=1&listFolders=0"
         data = self._get(url).json()
 
@@ -61,14 +72,14 @@ class ArtifactoryClient:
             )
 
         candidates = files
-        bf = (self.config.branch_filter or "").lower()
+        bf = (branch_filter or "").lower()
         if bf:
             filtered = [f for f in files if bf in f.get("uri", "").lower()]
             if filtered:
                 candidates = filtered
             elif log is not None:
                 log(
-                    f"No .swu matched branch '{self.config.branch_filter}'; "
+                    f"No .swu matched branch '{branch_filter}'; "
                     f"using newest of all {len(files)} files.",
                     "warning",
                 )
@@ -85,14 +96,20 @@ class ArtifactoryClient:
         log: Logger,
         progress: Optional[Progress] = None,
         is_cancelled: Optional[Callable[[], bool]] = None,
+        build_path: Optional[str] = None,
+        branch_filter: Optional[str] = None,
     ) -> Path:
         """Download the latest SWU into ``cache_dir`` and return its path.
 
         Uses an existing cached copy if present. Streams to a ``.part`` file
         first so an interrupted/cancelled download never leaves a corrupt file.
+
+        ``build_path``/``branch_filter`` override the configured defaults to
+        select a specific build source (e.g. wrynose vs MatrixG2-2.0).
         """
+        build_path = build_path or self.config.build_path
         log("Listing latest SWU from Artifactory...", "info")
-        rel_path = self.find_latest_swu(log)  # relative to build_path
+        rel_path = self.find_latest_swu(log, build_path=build_path, branch_filter=branch_filter)
         swu_name = rel_path.split("/")[-1]
 
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -102,7 +119,7 @@ class ArtifactoryClient:
             log(f"Already cached: {swu_name}", "success")
             return dest
 
-        download_url = f"{self.config.url}/{self.config.repo}/{self.config.build_path}/{rel_path}"
+        download_url = f"{self.config.url}/{self.config.repo}/{build_path}/{rel_path}"
         tmp = dest.with_suffix(dest.suffix + ".part")
         log(f"Downloading {swu_name}...", "info")
 
