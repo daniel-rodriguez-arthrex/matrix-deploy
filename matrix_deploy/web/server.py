@@ -29,6 +29,7 @@ from ..artifactory import ArtifactoryClient, ArtifactoryCredentials, Artifactory
 from ..config import AppConfig, Room, list_profiles
 from ..deployer import DeploymentCredentials, DeploymentRequest, Deployer
 from ..env_settings import (
+    PATH_FIELDS,
     active_env_paths,
     default_env_path,
     load_merged_env,
@@ -649,6 +650,16 @@ class SaveCredentialsRequest(BaseModel):
     jenkins_token: Optional[str] = None
 
 
+class SavePathsRequest(BaseModel):
+    """Settings > Local folders. ``""`` clears a saved folder, ``None`` leaves it."""
+    swu_download_dir: Optional[str] = None
+    swu_file: Optional[str] = None
+    backend_repo: Optional[str] = None
+    web_repo: Optional[str] = None
+    webapp_dist: Optional[str] = None
+    webapp_web: Optional[str] = None
+
+
 class ProfileSelectRequest(BaseModel):
     path: str
 
@@ -677,6 +688,11 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     jobs = JobManager()
     tunnels = TunnelManager()
     app = FastAPI(title="Matrix Deploy")
+
+    def _swu_download_dir() -> Path:
+        """The user's saved SWU download folder, else the default."""
+        saved = load_merged_env(app_config.path)[0].get("swu_download_dir")
+        return Path(saved) if saved else DEFAULT_SWU_CACHE_DIR
 
     def _lab_env_path() -> Path:
         """Where the active site's SSH/sudo passwords are saved: its sibling
@@ -752,11 +768,11 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         """List sub-folders and ``.swu`` files under ``path`` (defaults to the
         SWU download folder) so the web UI can offer a native-feeling file
         browser. Localhost/single-user, so browsing the machine is fine."""
-        base = Path(path) if path else DEFAULT_SWU_CACHE_DIR
+        base = Path(path) if path else _swu_download_dir()
         try:
             base = base.resolve()
         except Exception:  # noqa: BLE001
-            base = DEFAULT_SWU_CACHE_DIR
+            base = _swu_download_dir()
         if base.is_file():
             base = base.parent
         if not base.exists():
@@ -804,9 +820,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "username": env.get("username", ""),
                 "artifactory_email": env.get("artifactory_email", ""),
                 "jenkins_username": env.get("jenkins_username", ""),
-                "swu_file": env.get("swu_file", ""),
-                "backend_repo": env.get("backend_repo", ""),
-                "web_repo": env.get("web_repo", ""),
+                **{f: env.get(f, "") for f in PATH_FIELDS},
             },
             "secrets": {
                 "ssh_password": secrets.get("ssh_password", ""),
@@ -818,7 +832,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             "lab_env_path": str(_lab_env_path()),
             "env_present": bool(env or secrets),
             "defaults": {
-                "swu_download_dir": str(DEFAULT_SWU_CACHE_DIR),
+                "swu_download_dir": str(_swu_download_dir()),
+                "builtin_swu_download_dir": str(DEFAULT_SWU_CACHE_DIR),
             },
         }
 
@@ -839,6 +854,30 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Could not save credentials: {exc}")
         return {"lab_env_path": str(lab_path), "shared_env_path": str(shared_path)}
+
+    @app.post("/api/setup/save-paths")
+    def save_paths(req: SavePathsRequest) -> Dict[str, Any]:
+        """Settings > Local folders: save this machine's folders to the root
+        .env. Saves even if a folder doesn't exist yet (e.g. repo not cloned
+        yet) but reports it so the UI can warn."""
+        values = {f: (v.strip().strip('"') if v is not None else None) for f, v in req.model_dump().items()}
+        warnings = []
+        for field, value in values.items():
+            if not value:
+                continue
+            p = Path(value).expanduser()
+            if field == "swu_file" and not p.is_file():
+                warnings.append(f"SWU file not found: {value}")
+            elif field == "swu_download_dir" and p.exists() and not p.is_dir():
+                warnings.append(f"Download folder is a file, not a folder: {value}")
+            elif field not in ("swu_file", "swu_download_dir") and not p.is_dir():
+                warnings.append(f"Folder not found: {value}")
+        env_path = default_env_path()
+        try:
+            save_env_values(env_path, values, allow_clear=True)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save folders: {exc}")
+        return {"saved_to": str(env_path), "warnings": warnings}
 
     @app.get("/api/health")
     def health() -> Dict[str, str]:
@@ -977,8 +1016,11 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             if match is None:
                 raise HTTPException(status_code=400, detail=f"Unknown build branch: {req.branch}")
             build_path, branch_filter, label = match.build_path, match.branch_filter, match.label
+        saved_dir = load_merged_env(app_config.path)[0].get("swu_download_dir")
         if req.cache_dir:
             cache_dir = Path(req.cache_dir)
+        elif saved_dir:
+            cache_dir = Path(saved_dir)
         elif label:
             # Keep each branch's SWUs in their own folder so they don't collide.
             cache_dir = DEFAULT_SWU_CACHE_DIR.with_name(f"latest-matrix-{label}")

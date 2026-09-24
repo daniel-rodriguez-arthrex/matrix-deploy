@@ -44,6 +44,14 @@ window.FAQ_SECTIONS = [
           "Enter them under <b>Settings &rarr; Edit saved credentials</b> (open the <i>Artifactory &amp; Jenkins</i> section).",
       },
       {
+        q: "How do I set my own download folder and repo paths?",
+        a: "Go to <b>Settings &rarr; Local folders</b>, paste your paths and click <b>Save folders</b>. They're saved to your " +
+          "<code>.env</code> on this computer only and fill in the Deploy and Web App tabs from then on. Tip: in File Explorer, " +
+          "Shift+right-click a folder &rarr; <b>Copy as path</b>. The SWU download folder defaults to " +
+          "<code>&lt;your home&gt;\\Desktop\\latest-matrix-wrynose</code> and is created on first download. The repo and dist " +
+          "folders are only needed for the Web App tab. The Setup Check warns if a saved folder no longer exists.",
+      },
+      {
         q: "Where are my passwords and tokens stored?",
         a: "Values you enter in the <b>Edit saved credentials</b> dialog are saved <b>in plain text</b> on this computer only: lab " +
           "SSH/sudo passwords in <code>config\\&lt;lab&gt;.env</code>, and Artifactory/Jenkins in <code>.env</code> next to " +

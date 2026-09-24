@@ -130,7 +130,8 @@ No code changes are needed to retarget a different environment.
 | File | Holds | Written by |
 |---|---|---|
 | `config/<lab>.env` | That lab's `SSH_PASSWORD` / `SUDO_PASSWORD` (`MATRIX_*` aliases accepted) | The **Edit saved credentials** dialog |
-| `.env` (next to `run_server.py` / `MatrixDeploy.exe`) | `ARTIFACTORY_EMAIL` / `ARTIFACTORY_TOKEN`, `JENKINS_USERNAME` / `JENKINS_TOKEN`, optional `SWU_FILE`, `BACKEND_REPO`, `WEB_REPO` | The **Edit saved credentials** dialog |
+| `.env` (next to `run_server.py` / `MatrixDeploy.exe`) | `ARTIFACTORY_EMAIL` / `ARTIFACTORY_TOKEN`, `JENKINS_USERNAME` / `JENKINS_TOKEN` | The **Edit saved credentials** dialog |
+| same `.env` | This computer's folders: `SWU_DOWNLOAD_DIR`, `SWU_FILE`, `BACKEND_REPO`, `WEB_REPO`, `WEBAPP_DIST`, `WEBAPP_WEB` | **Settings → Local folders** |
 
 See `.env.example` for all keys. Values in these files are **plaintext on
 disk** and prefill the UI on launch. Leave them blank to type credentials into

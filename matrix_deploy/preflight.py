@@ -36,8 +36,9 @@ class Check:
     status: str  # "ok" | "warn" | "error"
     detail: str
     fix: str = ""
-    # UI hint for a one-click fix button: "creds" (lab passwords) or
-    # "creds-shared" (Artifactory/Jenkins section of the same dialog).
+    # UI hint for a one-click fix button: "creds" (lab passwords),
+    # "creds-shared" (Artifactory/Jenkins section of the same dialog) or
+    # "folders" (Settings > Local folders).
     action: str = ""
 
 
@@ -173,6 +174,23 @@ def run_preflight(
                 "Install Git / Node.js, or deploy pre-built dist folders instead.")
         else:
             add("build_tools", "Build from source", "ok", "git and npm found.")
+
+    # --- Saved local folders ----------------------------------------------
+    # Only folders the user saved; unset ones just use defaults / get typed in.
+    labels = {"swu_file": "Default SWU file", "backend_repo": "Backend repo", "web_repo": "Web app repo",
+              "webapp_dist": "Backend dist folder", "webapp_web": "Web assets folder"}
+    missing = [f"{label} ({env[f]})" for f, label in labels.items()
+               if env.get(f) and not Path(env[f]).expanduser().exists()]
+    dl = env.get("swu_download_dir")
+    if dl and Path(dl).expanduser().exists() and not Path(dl).expanduser().is_dir():
+        missing.append(f"SWU download folder ({dl}) is a file")
+    saved = [f for f in (*labels, "swu_download_dir") if env.get(f)]
+    if missing:
+        add("folders", "Local folders", "warn",
+            "Saved but not found on this computer: " + "; ".join(missing),
+            "Click 'Set my folders' and point them at folders on this computer (or clear them).", "folders")
+    elif saved:
+        add("folders", "Local folders", "ok", f"{len(saved)} saved folder(s) found.")
 
     # --- Network ----------------------------------------------------------
     if network and config.rooms and conn.router_ip:

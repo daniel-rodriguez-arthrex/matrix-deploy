@@ -24,6 +24,12 @@ $labKeysAllowed = '^\s*(export\s+)?(MATRIX_)?(SSH|SUDO)_PASSWORD\s*='
 # Build, assemble and zip in %TEMP%, then copy the results to dist\. The repo
 # lives under OneDrive, whose sync locks freshly written files and makes
 # PyInstaller cleanup / Compress-Archive fail with "Access is denied".
+$running = Get-Process MatrixDeploy -ErrorAction SilentlyContinue |
+  Where-Object { $_.Path -like "$outRoot\*" }
+if ($running) {
+  throw "MatrixDeploy.exe is running from $outRoot (PID $($running.Id -join ', ')). Close its console window(s), then re-run the build."
+}
+
 $work = Join-Path $env:TEMP "matrixdeploy-pyinstaller"
 $stage = Join-Path $work "dist"
 $distDir = Join-Path $stage "MatrixDeploy"
@@ -98,6 +104,9 @@ MATRIX DEPLOY - QUICK START
    your email.
 
 4. Pick your lab from the "Site" dropdown at the top-left.
+
+5. Optional: set your own SWU download folder (and repo/dist folders if
+   you use the Web App tab) under Settings > Local folders > Save folders.
 
 Your passwords and tokens are saved as plain text in this folder, only on
 this computer (config\<lab>.env and .env). Don't share the folder after you've

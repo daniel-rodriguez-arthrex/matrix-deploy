@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 
 # Recognized non-secret keys and the settings field they map to.
@@ -22,9 +22,16 @@ NON_SECRET_KEY_MAP = {
     "ARTIFACTORY_EMAIL": "artifactory_email",
     "JENKINS_USERNAME": "jenkins_username",
     "SWU_FILE": "swu_file",
+    "SWU_DOWNLOAD_DIR": "swu_download_dir",
     "BACKEND_REPO": "backend_repo",
     "WEB_REPO": "web_repo",
+    "WEBAPP_DIST": "webapp_dist",
+    "WEBAPP_WEB": "webapp_web",
 }
+
+# Per-machine folder settings (Settings > Local folders). Saved to the root
+# .env; every coworker's machine has different paths, so these never ship.
+PATH_FIELDS = ("swu_download_dir", "swu_file", "backend_repo", "web_repo", "webapp_dist", "webapp_web")
 
 # Secret keys and the field they map to. ``MATRIX_*`` aliases match the per-lab
 # credential files exported by the Matrix Lab VS Code extension
@@ -120,13 +127,14 @@ def _format_env_value(value: str) -> str:
     return f"{quote}{value}{quote}"
 
 
-def save_env_values(path: Path, values: Dict[str, str]) -> None:
+def save_env_values(path: Path, values: Dict[str, Optional[str]], allow_clear: bool = False) -> None:
     """Write field values (``ssh_password``, ``artifactory_email``, ...) into
     the .env at ``path``, creating it if needed. An existing line for the
     field - under any accepted alias, e.g. ``MATRIX_SSH_PASSWORD`` - is
     updated in place; everything else in the file is left untouched. Empty
-    values are skipped (they never erase a saved value)."""
-    pending = {f: v for f, v in values.items() if v}
+    values are skipped (they never erase a saved value) unless
+    ``allow_clear``, where ``""`` clears the key and only ``None`` skips."""
+    pending = {f: v for f, v in values.items() if v or (allow_clear and v is not None)}
     if not pending:
         return
     path = Path(path)
@@ -147,7 +155,7 @@ def save_env_values(path: Path, values: Dict[str, str]) -> None:
             written.add(field_name)
     canonical = {field_name: key for key, field_name in reversed(list(ENV_KEY_MAP.items()))}
     for field_name, value in pending.items():
-        if field_name not in written:
+        if field_name not in written and value:
             lines.append(f"{canonical[field_name]}={_format_env_value(value)}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")

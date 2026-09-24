@@ -396,6 +396,27 @@
           </div>
         </div>
 
+        <div class="card" id="folders-card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg> Local folders</h2><span class="badge subtle">this computer only</span></div>
+          <p class="hint">Folders on <em>this</em> computer, saved to your <code>.env</code> and filled in automatically on the Deploy and Web App tabs. Tip: in File Explorer, Shift+right-click a folder &rarr; <em>Copy as path</em>, then paste here. Leave a field empty to use the default or type it each time.</p>
+          <div class="field-row">
+            <label class="field grow"><span>SWU download folder</span><input type="text" id="fold-swu-download-dir" autocomplete="off" /></label>
+            <label class="field grow"><span>Default SWU file (optional)</span><input type="text" id="fold-swu-file" autocomplete="off" placeholder="C:\path\to\build.swu" /></label>
+          </div>
+          <div class="field-row" style="margin-top:10px;">
+            <label class="field grow"><span>Backend repo (matrix-api-linux)</span><input type="text" id="fold-backend-repo" autocomplete="off" placeholder="Only for Web App &rarr; Build from source" /></label>
+            <label class="field grow"><span>Web app repo (matrix-app-linux)</span><input type="text" id="fold-web-repo" autocomplete="off" placeholder="Only for Web App &rarr; Build from source" /></label>
+          </div>
+          <div class="field-row" style="margin-top:10px;">
+            <label class="field grow"><span>Backend dist folder</span><input type="text" id="fold-webapp-dist" autocomplete="off" placeholder="Only for Web App &rarr; Deploy existing build" /></label>
+            <label class="field grow"><span>Web assets folder</span><input type="text" id="fold-webapp-web" autocomplete="off" placeholder="Only for Web App &rarr; Deploy existing build" /></label>
+          </div>
+          <div class="action-grid" style="margin-top:12px;">
+            <button class="primary" id="folders-save">Save folders</button>
+            <span class="config-status" id="folders-status"></span>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg> Connection</h2><span class="badge subtle">config/deploy_config.json</span></div>
           <p class="hint">Active site connection loaded from <code>config/deploy_config.json</code>. Edit that file to retarget the environment, then restart the server.</p>

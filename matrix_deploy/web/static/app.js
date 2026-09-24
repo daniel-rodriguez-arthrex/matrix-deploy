@@ -377,14 +377,9 @@ async function loadSetup(force = false) {
   const p = s.prefill, sec = s.secrets;
   const yn = (val) => (val ? "set" : "not set");
   const cls = (val) => (val ? "on" : "off");
-  const swuDownloadDir = (s.defaults && s.defaults.swu_download_dir) || "";
   el("settings-env").innerHTML = [
     settingCell("Artifactory email", p.artifactory_email || "not set", cls(p.artifactory_email)),
     settingCell("Jenkins username", p.jenkins_username || "not set", cls(p.jenkins_username)),
-    settingCell("Default SWU file", p.swu_file || "not set", cls(p.swu_file)),
-    settingCell("SWU download folder", swuDownloadDir || "not set", cls(swuDownloadDir)),
-    settingCell("Backend repo", p.backend_repo || "not set", cls(p.backend_repo)),
-    settingCell("Web app repo", p.web_repo || "not set", cls(p.web_repo)),
     settingCell("SSH password", yn(sec.ssh_password), cls(sec.ssh_password)),
     settingCell("Sudo password", yn(sec.sudo_password), cls(sec.sudo_password)),
     settingCell("Artifactory token", yn(sec.artifactory_token), cls(sec.artifactory_token)),
@@ -399,6 +394,9 @@ async function loadSetup(force = false) {
   prefill("jenkins-username", p.jenkins_username, force);
   prefill("webapp-backend-repo", p.backend_repo, force);
   prefill("webapp-web-repo", p.web_repo, force);
+  prefill("webapp-local-dist", p.webapp_dist, force);
+  prefill("webapp-local-web", p.webapp_web, force);
+  fillFoldersCard(s);
   prefill("ssh-password", sec.ssh_password, force);
   prefill("sudo-password", sec.sudo_password, force);
   prefill("artifactory-token", sec.artifactory_token, force);
@@ -467,10 +465,64 @@ el("creds-modal-save").addEventListener("click", async () => {
   }
 });
 
+/* ---------- Local folders (Settings) ---------- */
+// Settings input id -> [saved .env field, live field it fills on other tabs]
+const FOLDER_FIELDS = {
+  "fold-swu-download-dir": ["swu_download_dir", "download-dir"],
+  "fold-swu-file": ["swu_file", "swu-file"],
+  "fold-backend-repo": ["backend_repo", "webapp-backend-repo"],
+  "fold-web-repo": ["web_repo", "webapp-web-repo"],
+  "fold-webapp-dist": ["webapp_dist", "webapp-local-dist"],
+  "fold-webapp-web": ["webapp_web", "webapp-local-web"],
+};
+function fillFoldersCard(s) {
+  for (const [id, [key]] of Object.entries(FOLDER_FIELDS)) el(id).value = s.prefill[key] || "";
+  el("fold-swu-download-dir").placeholder = `Default: ${s.defaults.builtin_swu_download_dir}`;
+}
+el("folders-save").addEventListener("click", async () => {
+  // Strip the quotes Explorer's "Copy as path" adds.
+  const clean = (v) => v.trim().replace(/^"(.*)"$/, "$1");
+  const body = {};
+  for (const [id, [key]] of Object.entries(FOLDER_FIELDS)) body[key] = clean(el(id).value);
+  const status = el("folders-status");
+  try {
+    const res = await fetch("/api/setup/save-paths", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail || res.statusText);
+    // Push the saved folders into the Deploy / Web App fields right away.
+    const builtin = state.setup ? state.setup.defaults.builtin_swu_download_dir : "";
+    for (const [id, [key, live]] of Object.entries(FOLDER_FIELDS)) {
+      el(id).value = body[key];
+      el(live).value = body[key] || (live === "download-dir" ? builtin : el(live).value);
+    }
+    status.textContent = d.warnings.length ? `Saved, with ${d.warnings.length} warning(s) - see console.` : "Saved.";
+    logTo(GENERAL_TAB, `Folders saved to ${d.saved_to}.`, "success");
+    d.warnings.forEach((w) => logTo(GENERAL_TAB, w, "warning"));
+    loadPreflight();
+  } catch (e) {
+    status.textContent = "Save failed - see console.";
+    logTo(GENERAL_TAB, `Saving folders failed: ${e.message || e}`, "error");
+  }
+});
+
 /* ---------- Setup Check (preflight) ---------- */
-const PF_FIX_LABEL = { creds: "Enter passwords", "creds-shared": "Enter my Artifactory/Jenkins details" };
+const PF_FIX_LABEL = {
+  creds: "Enter passwords",
+  "creds-shared": "Enter my Artifactory/Jenkins details",
+  folders: "Set my folders",
+};
 let preflightLogged = false;
 function runPreflightFix(action) {
+  if (action === "folders") {
+    openSettingsTab();
+    el("folders-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    el("fold-swu-download-dir").focus();
+    return;
+  }
   openCredsModal();
   if (action === "creds-shared") {
     el("creds-shared").open = true;
