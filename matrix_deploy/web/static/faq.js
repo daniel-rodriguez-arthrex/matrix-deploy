@@ -13,8 +13,8 @@ window.FAQ_SECTIONS = [
         q: "I just got the MatrixDeploy folder. What do I do first?",
         a: "<ul>" +
           "<li>Extract the whole zip somewhere you own (Documents or Desktop), not Program Files, and don't run it from inside the zip.</li>" +
-          "<li>Double-click <code>MatrixDeploy.exe</code>. A console window runs a <b>Setup Check</b> and then opens this page in your browser.</li>" +
-          "<li>Keep the console window open while you use the app. Closing it stops the app.</li>" +
+          "<li>Double-click <code>MatrixDeploy.exe</code>. Matrix Deploy opens in its own window. Closing that window quits the app. " +
+          "If a job is still running, it finishes first.</li>" +
           "<li>Go to <b>Settings &rarr; Setup Check</b>. Fix anything red with the button next to it. Amber items only affect optional features.</li>" +
           "</ul>",
       },
@@ -23,7 +23,8 @@ window.FAQ_SECTIONS = [
         a: "Whether the app folder is writable, the bundled app files are present, a site profile loads (and has no example values left), " +
           "the lab SSH/sudo passwords are saved, your Artifactory and Jenkins credentials are set (optional), git/npm exist if you set " +
           "build-from-source repos (optional), and whether the lab router answers. A red banner appears at the top of every tab while " +
-          "something blocking is wrong. Click <b>Re-run check</b> after fixing things. You can also run <code>MatrixDeploy.exe --check</code> in a terminal.",
+          "something blocking is wrong. Click <b>Re-run check</b> after fixing things. If the app can't start at all, a message box explains why " +
+          "(details in <code>matrixdeploy.log</code> next to the exe).",
       },
       {
         q: "How do I switch between labs?",
@@ -59,9 +60,10 @@ window.FAQ_SECTIONS = [
           "close the app. Once you've added your own tokens, <b>don't pass your folder on</b>. Share the original zip instead.",
       },
       {
-        q: "I double-clicked MatrixDeploy.exe again and no new window appeared.",
-        a: "The app is already running, so a second launch just reopens the browser tab for the running copy. To restart it, " +
-          "close the existing console window first.",
+        q: "How do I quit or restart Matrix Deploy?",
+        a: "Close its window. It quits a few seconds later, or right after any running deploy/action finishes. It asks you first " +
+          "if a job is running. Live log streams are simply stopped. Double-clicking <code>MatrixDeploy.exe</code> while it's already " +
+          "open just opens another window onto the same copy. It never starts a second one.",
       },
     ],
   },
@@ -205,10 +207,9 @@ window.FAQ_SECTIONS = [
     items: [
       {
         q: "Everything fails with \"Failed to fetch\" / a red \"Matrix Deploy isn't running\" banner.",
-        a: "The page is still open but the app behind it stopped, usually because its console window was closed. Start " +
-          "<code>MatrixDeploy.exe</code> again. The page reconnects by itself within a few seconds. If a new tab opens on a " +
-          "different address (e.g. <code>:8421</code>), use that one and close the old tab. Only run one copy at a time: " +
-          "double-clicking the exe again just reopens the running one.",
+        a: "The page is still open but the app behind it stopped (e.g. it quit after its main window was closed while this one " +
+          "was left open in a browser tab). Start <code>MatrixDeploy.exe</code> again. The page reconnects by itself within a few " +
+          "seconds, or you can use the new window that opens and close this one.",
       },
       {
         q: "Setup Check says \"Lab network\" can't reach the router.",

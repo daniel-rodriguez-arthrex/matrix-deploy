@@ -101,6 +101,9 @@ class Job:
         self.events: "queue.Queue[Optional[Dict[str, Any]]]" = queue.Queue()
         self.cancel_event = threading.Event()
         self.thread: Optional[threading.Thread] = None
+        # Real work (deploys, actions, downloads) keeps the app running after
+        # its window closes until it finishes; endless live log tails don't.
+        self.keeps_alive = True
 
     def emit(self, event: Dict[str, Any]) -> None:
         self.events.put(event)
@@ -108,6 +111,50 @@ class Job:
     def finish(self) -> None:
         self.events.put({"type": "all_done"})
         self.events.put(None)  # sentinel for the websocket reader
+
+
+class Presence:
+    """Which app windows/tabs are open, via heartbeats. Lets the packaged app
+    quit when its window closes (see ``run_server.py``).
+
+    A tab says ``bye`` on close (fast path). Heartbeats from minimized or
+    background windows can be throttled to ~1/minute, and a crashed tab never
+    says bye, so a silent client only expires after ``CLIENT_TIMEOUT``.
+    """
+
+    CLIENT_TIMEOUT = 15 * 60
+    STARTUP_GRACE = 120  # how long to wait for the first window to connect
+
+    def __init__(self) -> None:
+        self._clients: Dict[str, float] = {}
+        self._lock = threading.Lock()
+        self._started = time.monotonic()
+        self._seen_client = False
+        self._idle_since: Optional[float] = None
+
+    def beat(self, client_id: str) -> None:
+        with self._lock:
+            self._clients[client_id] = time.monotonic()
+            self._seen_client = True
+
+    def bye(self, client_id: str) -> None:
+        with self._lock:
+            self._clients.pop(client_id, None)
+
+    def idle_seconds(self, active_jobs: int) -> Optional[float]:
+        """Seconds since the app last had an open window and no running
+        jobs, or ``None`` while it's in use."""
+        now = time.monotonic()
+        with self._lock:
+            self._clients = {c: t for c, t in self._clients.items() if now - t < self.CLIENT_TIMEOUT}
+            waiting_for_first = not self._seen_client and now - self._started < self.STARTUP_GRACE
+            in_use = bool(self._clients) or active_jobs > 0 or waiting_for_first
+        if in_use:
+            self._idle_since = None
+            return None
+        if self._idle_since is None:
+            self._idle_since = now
+        return now - self._idle_since
 
 
 class JobManager:
@@ -130,6 +177,16 @@ class JobManager:
 
     def cancel(self, job_id: str) -> None:
         self.get(job_id).cancel_event.set()
+
+    def active_count(self) -> int:
+        """Jobs still doing real work (see ``Job.keeps_alive``)."""
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.keeps_alive and j.thread and j.thread.is_alive())
+
+    def cancel_all(self) -> None:
+        with self._lock:
+            for j in self._jobs.values():
+                j.cancel_event.set()
 
     def _make_deployer(self, job: Job, config: AppConfig, creds: DeploymentCredentials, room: Room) -> Deployer:
         return Deployer(
@@ -400,6 +457,7 @@ class JobManager:
         """Follow a systemd service's journal live (``journalctl -f``) and push
         each line as a log event until the job is cancelled."""
         job = self._register([room])
+        job.keeps_alive = False  # endless; don't hold the app open for it
 
         def run() -> None:
             conn = config.connection
@@ -687,7 +745,10 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     app_config = config or AppConfig.load()
     jobs = JobManager()
     tunnels = TunnelManager()
+    presence = Presence()
     app = FastAPI(title="Matrix Deploy")
+    # For run_server.py's auto-quit watchdog.
+    app.state.idle_seconds = lambda: presence.idle_seconds(jobs.active_count())
 
     def _swu_download_dir() -> Path:
         """The user's saved SWU download folder, else the default."""
@@ -883,6 +944,16 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     def health() -> Dict[str, str]:
         """Lets a second launch of run_server.py detect this instance."""
         return {"app": "matrix-deploy"}
+
+    @app.post("/api/presence")
+    def presence_beat(id: str) -> Dict[str, int]:
+        presence.beat(id)
+        return {"active_jobs": jobs.active_count()}
+
+    @app.post("/api/presence/bye")
+    def presence_bye(id: str) -> Dict[str, bool]:
+        presence.bye(id)
+        return {"ok": True}
 
     @app.get("/api/preflight")
     def preflight(network: bool = True) -> Dict[str, Any]:
@@ -1179,6 +1250,9 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         # (Ctrl+C). On a hard kill the OS closes the sockets anyway, so
         # nothing lingers locally or on the room either way.
         tunnels.close_all()
+        # Stops any live log tails (the only jobs that can still be running
+        # when the app auto-quits).
+        jobs.cancel_all()
 
     @app.middleware("http")
     async def revalidate_ui_assets(request, call_next):

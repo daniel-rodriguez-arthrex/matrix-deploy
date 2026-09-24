@@ -9,6 +9,24 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
+/* ---------- Toasts + busy buttons ---------- */
+// Visible confirmation for saves etc. - the console may be collapsed or on
+// another tab, so it isn't enough on its own.
+function toast(message, level = "info") {
+  const t = document.createElement("div");
+  t.className = `toast ${level}`;
+  t.textContent = message;
+  el("toast-stack").appendChild(t);
+  setTimeout(() => t.classList.add("leaving"), level === "error" ? 7000 : 3500);
+  setTimeout(() => t.remove(), level === "error" ? 7400 : 3900);
+}
+function setBusy(btn, label) {
+  const original = btn.innerHTML;
+  btn.disabled = true;
+  btn.textContent = label;
+  return () => { btn.disabled = false; btn.innerHTML = original; };
+}
+
 /* ---------- Server connection watchdog ---------- */
 // A network-level fetch failure ("TypeError: Failed to fetch") means the local
 // server is gone - almost always because its console window was closed. Show
@@ -32,6 +50,23 @@ function setServerDown(down) {
     logTo(GENERAL_TAB, "Reconnected to Matrix Deploy.", "success");
   }
 }
+// Presence: tells the server this window is open, so the packaged app can quit
+// when the last window closes (it waits for running jobs to finish first).
+const CLIENT_ID = (crypto.randomUUID && crypto.randomUUID()) || String(Math.random()).slice(2);
+function presenceBeat() {
+  rawFetch(`/api/presence?id=${CLIENT_ID}`, { method: "POST" })
+    .then(() => setServerDown(false))
+    .catch(() => setServerDown(true));
+}
+presenceBeat();
+setInterval(presenceBeat, 20000);
+window.addEventListener("pagehide", () => navigator.sendBeacon(`/api/presence/bye?id=${CLIENT_ID}`));
+window.addEventListener("beforeunload", (e) => {
+  // Closing mid-job is allowed (the app finishes the job, then quits), but
+  // warn so it's never an accident.
+  if (document.querySelector("#job-indicator .dot.active")) e.preventDefault();
+});
+
 window.fetch = async (...args) => {
   try {
     const res = await rawFetch(...args);
@@ -465,6 +500,7 @@ function openCredsModal() {
     if (group === "secrets") el(id).placeholder = saved ? "saved \u2014 leave blank to keep" : "";
   }
   el("creds-path").textContent = `Lab passwords are saved to ${s.lab_env_path}`;
+  el("creds-error").hidden = true;
   el("creds-modal").hidden = false;
   el("creds-ssh").focus();
 }
@@ -479,6 +515,12 @@ el("creds-modal").addEventListener("keydown", (e) => { if (e.key === "Enter") el
 el("creds-modal-save").addEventListener("click", async () => {
   const body = {};
   for (const [id, [, key]] of Object.entries(CREDS_FIELDS)) body[key] = el(id).value.trim() ? el(id).value : null;
+  // Count real changes: any typed secret, or an email/username that differs.
+  const s = state.setup;
+  const saved = Object.entries(CREDS_FIELDS).filter(([, [group, key]]) =>
+    body[key] !== null && (group === "secrets" || body[key] !== (s[group][key] || null))).length;
+  el("creds-error").hidden = true;
+  const done = setBusy(el("creds-modal-save"), "Saving\u2026");
   try {
     const res = await fetch("/api/setup/save", {
       method: "POST",
@@ -487,15 +529,22 @@ el("creds-modal-save").addEventListener("click", async () => {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: res.statusText }));
-      logTo(GENERAL_TAB, `Saving credentials failed: ${err.detail}`, "error");
-      return;
+      throw new Error(err.detail);
     }
     el("creds-modal").hidden = true;
-    logTo(GENERAL_TAB, "Credentials saved on this computer.", "success");
+    const msg = saved ? `Saved ${saved} value${saved > 1 ? "s" : ""} on this computer.` : "No changes to save.";
+    toast(msg, saved ? "success" : "info");
+    logTo(GENERAL_TAB, `Credentials: ${msg}`, "success");
     await loadSetup(true);
     loadPreflight();
   } catch (e) {
-    logTo(GENERAL_TAB, `Saving credentials failed: ${e}`, "error");
+    const msg = serverDown ? "Matrix Deploy isn't running - start it again, then retry." : `Couldn't save: ${e.message || e}`;
+    el("creds-error").textContent = msg;
+    el("creds-error").hidden = false;
+    toast(msg, "error");
+    logTo(GENERAL_TAB, `Saving credentials failed: ${e.message || e}`, "error");
+  } finally {
+    done();
   }
 });
 
@@ -519,6 +568,8 @@ el("folders-save").addEventListener("click", async () => {
   const body = {};
   for (const [id, [key]] of Object.entries(FOLDER_FIELDS)) body[key] = clean(el(id).value);
   const status = el("folders-status");
+  status.textContent = "";
+  const done = setBusy(el("folders-save"), "Saving\u2026");
   try {
     const res = await fetch("/api/setup/save-paths", {
       method: "POST",
@@ -533,13 +584,24 @@ el("folders-save").addEventListener("click", async () => {
       el(id).value = body[key];
       el(live).value = body[key] || (live === "download-dir" ? builtin : el(live).value);
     }
-    status.textContent = d.warnings.length ? `Saved, with ${d.warnings.length} warning(s) - see console.` : "Saved.";
+    const when = new Date().toLocaleTimeString();
+    if (d.warnings.length) {
+      status.textContent = `Saved at ${when} \u2014 ${d.warnings.join("; ")}`;
+      toast(`Folders saved, but ${d.warnings.length} not found on this computer.`, "warning");
+    } else {
+      status.textContent = `\u2714 Saved at ${when}`;
+      toast("Folders saved.", "success");
+    }
     logTo(GENERAL_TAB, `Folders saved to ${d.saved_to}.`, "success");
     d.warnings.forEach((w) => logTo(GENERAL_TAB, w, "warning"));
     loadPreflight();
   } catch (e) {
-    status.textContent = "Save failed - see console.";
+    const msg = serverDown ? "Matrix Deploy isn't running - start it again, then retry." : `Couldn't save: ${e.message || e}`;
+    status.textContent = msg;
+    toast(msg, "error");
     logTo(GENERAL_TAB, `Saving folders failed: ${e.message || e}`, "error");
+  } finally {
+    done();
   }
 });
 

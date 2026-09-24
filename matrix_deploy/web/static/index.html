@@ -83,7 +83,7 @@
     <div class="work">
       <!-- Shown when the local server stops answering (console window closed) -->
       <div class="setup-banner error server-banner" id="server-banner" hidden>
-        <span class="setup-banner-text"><strong>Matrix Deploy isn't running.</strong> Its console window was probably closed, so nothing on this page will work. Start <code>MatrixDeploy.exe</code> again &mdash; this page reconnects by itself once it's back (if the address changed, use the tab that opens instead).</span>
+        <span class="setup-banner-text"><strong>Matrix Deploy has stopped</strong>, so nothing on this page will work. Start <code>MatrixDeploy.exe</code> again &mdash; this page reconnects by itself once it's back (or use the new window that opens and close this one).</span>
       </div>
 
       <!-- Setup Check banner (shown only when something needs attention) -->
@@ -511,6 +511,7 @@
           <label class="field"><span>Jenkins token</span><input type="password" id="creds-jenkins-token" autocomplete="off" /></label>
         </div>
       </details>
+      <span class="creds-error" id="creds-error" role="alert" hidden></span>
       <span class="config-status" id="creds-path"></span>
     </div>
     <div class="modal-actions">
@@ -538,6 +539,8 @@
     </div>
   </div>
 </div>
+
+<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 
 <script src="/static/faq.js"></script>
 <script src="/static/app.js"></script>

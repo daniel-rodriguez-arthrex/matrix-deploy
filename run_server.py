@@ -1,32 +1,77 @@
 #!/usr/bin/env python3
-"""Entry point for the Matrix Deploy localhost web UI.
+"""Entry point for Matrix Deploy (also ``MatrixDeploy.exe``, see ``build_exe.ps1``).
 
-Starts a local-only (127.0.0.1) web server and opens the default browser to
-it - no separate install step beyond ``pip install -r requirements.txt``.
-Never bind this to 0.0.0.0: the server holds SSH/sudo/Artifactory secrets in
-memory once entered in the browser, and is designed for a single local user.
+Starts a local-only (127.0.0.1) web server and opens the UI in its own app
+window (Chrome/Edge ``--app`` mode: no tabs or address bar, falling back to
+the default browser). Never bind this to 0.0.0.0: the server holds SSH/sudo/
+Artifactory secrets in memory and is designed for a single local user.
 
-This is also the entry point of the distributable ``MatrixDeploy.exe`` (see
-``build_exe.ps1``); a Setup Check report is printed on every launch.
+The packaged exe has no console window: it quits by itself once its last
+window is closed and no job is running, logs to ``matrixdeploy.log`` next to
+the exe, and reports startup problems in a message box.
 
 Usage:
-    python run_server.py [--port 8420] [--no-browser] [--check]
+    python run_server.py [--port 8420] [--no-browser] [--check] [--keep-running]
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import shutil
 import socket
+import subprocess
 import sys
 import threading
+import time
 import urllib.request
 import webbrowser
+from pathlib import Path
 from typing import Optional
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8420
 FROZEN = getattr(sys, "frozen", False)
+# Quit this long after the last window closed (covers a page reload).
+IDLE_EXIT_AFTER = 10
+
+
+def _setup_stdio() -> bool:
+    """Make the packaged app a single window. The exe is a console-type build
+    (SentinelOne quarantines PyInstaller's windowed builds on sight), so when
+    it was double-clicked - i.e. it's the only process on its console - it
+    detaches, which closes that console window, and logs to
+    ``matrixdeploy.log`` instead. Started from a terminal, it keeps printing
+    there (e.g. ``--check``). Returns True if output goes to a console."""
+    if not (FROZEN and os.name == "nt"):
+        return True
+    import ctypes
+
+    kernel32 = ctypes.windll.kernel32
+    procs = (ctypes.c_uint * 4)()
+    if kernel32.GetConsoleProcessList(procs, 4) > 1:
+        return True
+    kernel32.FreeConsole()
+    try:
+        from matrix_deploy.config import app_dir
+
+        sys.stdout = sys.stderr = open(app_dir() / "matrixdeploy.log", "w", buffering=1, encoding="utf-8")
+    except OSError:
+        sys.stdout = sys.stderr = open(os.devnull, "w")
+    return False
+
+
+HAS_CONSOLE = _setup_stdio()
+
+
+def _alert(text: str, error: bool = True) -> None:
+    """Show ``text`` to the user: a message box for the windowed exe, else print."""
+    print(text, file=sys.stderr if error else sys.stdout)
+    if FROZEN and not HAS_CONSOLE and os.name == "nt":
+        import ctypes
+
+        ctypes.windll.user32.MessageBoxW(None, text, "Matrix Deploy", 0x10 if error else 0x40)
 
 
 def _find_open_port(host: str, preferred: int) -> int:
@@ -66,23 +111,39 @@ def _running_instance(preferred: int) -> Optional[int]:
     return None
 
 
-def _exit(code: int) -> None:
-    """Exit, keeping the console window open when launched by double-click so
-    the user can actually read what went wrong."""
-    if FROZEN and code:
+def _app_browser() -> Optional[str]:
+    """Chrome, else Edge (always present on Windows 10/11)."""
+    bases = [os.environ.get(v) for v in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")]
+    for rel in ("Google/Chrome/Application/chrome.exe", "Microsoft/Edge/Application/msedge.exe"):
+        for base in filter(None, bases):
+            candidate = Path(base) / rel
+            if candidate.is_file():
+                return str(candidate)
+    return shutil.which("chrome") or shutil.which("msedge")
+
+
+def _open_window(url: str) -> None:
+    """Open the UI as a standalone app window (normal browser profile, so
+    links like Jenkins/NMS open with the user's own logins)."""
+    browser = _app_browser()
+    if browser:
         try:
-            input("\nPress Enter to close this window...")
-        except EOFError:
+            subprocess.Popen([browser, f"--app={url}", "--window-size=1440,920"], close_fds=True)
+            return
+        except OSError:
             pass
-    sys.exit(code)
+    webbrowser.open(url)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Matrix Deploy web UI.")
+    parser = argparse.ArgumentParser(description="Run Matrix Deploy.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Preferred port (default: 8420)")
-    parser.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser tab")
+    parser.add_argument("--no-browser", action="store_true", help="Do not open the app window")
     parser.add_argument("--check", action="store_true", help="Run the Setup Check, print it and exit (1 on problems)")
+    parser.add_argument("--keep-running", action="store_true",
+                        help="Don't quit when the last window closes (default when not packaged)")
     args = parser.parse_args()
+    auto_exit = FROZEN and not args.keep_running
 
     try:
         import uvicorn
@@ -91,11 +152,9 @@ def main() -> None:
         from matrix_deploy.preflight import format_report, run_preflight, summarize
         from matrix_deploy.web.server import create_app
     except ImportError as exc:
-        print(f"Missing dependency: {exc}. Run: pip install -r requirements.txt", file=sys.stderr)
-        _exit(1)
+        _alert(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
+        sys.exit(1)
 
-    print("Matrix Deploy - Setup Check")
-    print("=" * 60)
     config, config_error = None, None
     try:
         config = AppConfig.load()
@@ -105,31 +164,49 @@ def main() -> None:
         config_error = f"Site profile is invalid ({exc.__class__.__name__}: {exc})."
 
     checks = run_preflight(config, config_error, network_timeout=2.0)
-    print(format_report(checks))
-    print("=" * 60)
+    report = f"Matrix Deploy - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
+    ok = summarize(checks)["ok"]
     if args.check:
-        _exit(0 if summarize(checks)["ok"] else 1)
+        if FROZEN and not HAS_CONSOLE:
+            _alert(report, error=not ok)
+        else:
+            print(report)
+        sys.exit(0 if ok else 1)
+    print(report)
     if config is None:
-        _exit(1)
+        _alert("Matrix Deploy can't start:\n\n" + format_report(checks))
+        sys.exit(1)
 
     running = _running_instance(args.port)
     if running:
         url = f"http://{HOST}:{running}"
         print(f"Matrix Deploy is already running at {url}")
         if not args.no_browser:
-            webbrowser.open(url)
+            _open_window(url)
         return
 
     port = _find_open_port(HOST, args.port)
     url = f"http://{HOST}:{port}"
     app = create_app(config)
+    server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning" if FROZEN else "info"))
+
+    if auto_exit:
+        def watchdog() -> None:
+            while not server.should_exit:
+                time.sleep(2)
+                idle = app.state.idle_seconds()
+                if idle is not None and idle >= IDLE_EXIT_AFTER:
+                    print("No open windows and no running jobs - quitting.")
+                    server.should_exit = True
+
+        threading.Thread(target=watchdog, daemon=True).start()
 
     if not args.no_browser:
-        threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.0, lambda: _open_window(url)).start()
 
     print(f"\nMatrix Deploy is running at {url}")
-    print("Keep this window open while you use it. Close it (or press Ctrl+C) to stop.\n")
-    uvicorn.run(app, host=HOST, port=port, log_level="warning" if FROZEN else "info")
+    print("Close the app window to quit." if auto_exit else "Press Ctrl+C to stop.")
+    server.run()
 
 
 if __name__ == "__main__":

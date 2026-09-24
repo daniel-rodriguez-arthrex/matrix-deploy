@@ -45,11 +45,15 @@ pip install -r requirements.txt
 
 ## Usage
 
-Start the web UI (binds to 127.0.0.1 only and opens your browser):
+Start it. It binds to 127.0.0.1 only and opens a Chrome/Edge app window:
 
 ```powershell
 python run_server.py
 ```
+
+When run from source it keeps running until Ctrl+C. The packaged exe quits by
+itself once its last window is closed and no job is running (running jobs
+finish first; live log streams are stopped).
 
 Setup Check only (prints a report, exits 1 if something must be fixed):
 
@@ -68,7 +72,7 @@ This builds the web UI into `dist\MatrixDeploy\` and zips it to
 
 | Item | Notes |
 |---|---|
-| `MatrixDeploy.exe`, `_internal\` | The app. Double-click to start. The console window must stay open while the app runs. |
+| `MatrixDeploy.exe`, `_internal\` | The app. Double-click to start. It opens in its own Chrome/Edge app window, with no console. |
 | `config\<lab>.json` | Every site profile in your `config\` folder. |
 | `config\<lab>.env` | **Only** `SSH_PASSWORD`/`SUDO_PASSWORD` (and `MATRIX_` aliases). All other keys in your lab `.env` are dropped. |
 | `START HERE.txt` | Quick start for coworkers. |
@@ -78,9 +82,10 @@ The build fails if a token shows up anywhere in the output. Each coworker enters
 their own tokens in the app. They're saved to `.env` next to the exe on that
 coworker's machine.
 
-On every launch a **Setup Check** runs, both in the console and in the web UI
-under **Settings > Setup Check**, with a red banner when something is blocking.
-It checks:
+On every launch a **Setup Check** runs and shows under **Settings > Setup
+Check**, with a red banner when something is blocking. If the app can't start
+at all (e.g. no site profile), a message box explains why. The exe logs to
+`matrixdeploy.log` next to itself. It checks:
 
 - The app folder is writable and isn't running from inside a zip.
 - The bundled UI/golden files are present.
@@ -91,7 +96,8 @@ It checks:
 - The lab router is reachable.
 
 Blocking items show a one-click fix button where one applies. Launching the exe
-a second time reopens the running instance instead of starting a second one.
+a second time opens another window onto the running instance instead of
+starting a second one.
 
 When frozen, `config\` and `.env` are always read from the folder that holds
 `MatrixDeploy.exe`, never from inside `_internal\`.

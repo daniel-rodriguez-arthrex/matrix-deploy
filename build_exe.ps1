@@ -51,6 +51,9 @@ Write-Host "Installing build dependencies..."
 Invoke-Native "pip install" { python -m pip install --disable-pip-version-check --upgrade pyinstaller -r requirements.txt }
 
 Write-Host "Building folder app..."
+# Must stay --console: SentinelOne deletes PyInstaller --windowed builds as
+# soon as they're written. run_server.py closes its own console window when
+# double-clicked, so users still only see the app window.
 Invoke-Native "PyInstaller" { python -m PyInstaller --noconfirm --clean --console --name MatrixDeploy `
   --workpath "$work\build" --specpath "$work" --distpath "$stage" `
   --add-data "$PSScriptRoot\matrix_deploy\web\static;matrix_deploy\web\static" `
@@ -90,9 +93,10 @@ MATRIX DEPLOY - QUICK START
    Don't run it from inside the .zip, and don't put it in Program Files.
 
 2. Double-click MatrixDeploy.exe.
-   A black console window opens and runs a Setup Check, then your browser
-   opens the app at http://127.0.0.1:8420.
-   Keep the console window open while you use the app; close it to stop.
+   Matrix Deploy opens in its own window (it uses Chrome or Edge behind the
+   scenes). Close that window to quit. If a deploy or other job is still
+   running, it finishes first, then quits. Double-clicking again while it's
+   open just brings up another window.
 
 3. In the app, open Settings > Setup Check.
      Red   = must fix. Use the button next to the item.
@@ -115,8 +119,8 @@ entered your own tokens.
 Troubleshooting
   - "Lab network" warning: connect to the lab network/VPN.
   - Windows SmartScreen "protected your PC": click More info > Run anyway.
-  - To re-run the check without starting the app, open a terminal in this
-    folder and run:  MatrixDeploy.exe --check
+  - Nothing opens, or it closes right away: a message box explains why.
+    Details are also in matrixdeploy.log in this folder.
 "@ | Set-Content -Path (Join-Path $distDir "START HERE.txt") -Encoding UTF8
 
 # --- Safety net: no personal tokens may ship --------------------------------
@@ -125,6 +129,11 @@ $leaks = Get-ChildItem $distDir -Recurse -File -Force |
   Select-String -Pattern '^\s*(export\s+)?(ARTIFACTORY_TOKEN|ARTIFACTORY_API_KEY|JENKINS_TOKEN)\s*=\s*\S'
 if ($leaks) { throw "Refusing to package: personal token found in $($leaks[0].Path)" }
 if (Test-Path (Join-Path $distDir ".env")) { throw "Refusing to package: a root .env ended up in the dist folder." }
+
+Start-Sleep -Seconds 5
+if (-not (Test-Path (Join-Path $distDir "MatrixDeploy.exe"))) {
+  throw "MatrixDeploy.exe disappeared after the build - security software (e.g. SentinelOne) likely quarantined it. Ask IT to allow it."
+}
 
 Write-Host "Zipping..."
 Add-Type -AssemblyName System.IO.Compression.FileSystem

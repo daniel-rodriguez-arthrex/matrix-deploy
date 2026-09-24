@@ -463,6 +463,20 @@ button { font-family: inherit; cursor: pointer; border: none; }
 .setup-banner.error { border-color: var(--danger); background: var(--danger-soft); }
 .setup-banner-text { flex: 1 1 260px; font-weight: 500; }
 .server-banner { position: sticky; top: 0; z-index: 20; }
+
+/* ---------- Toasts ---------- */
+.toast-stack { position: fixed; top: 16px; right: 16px; z-index: 1000; display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+.toast {
+  min-width: 240px; max-width: 420px; padding: 10px 14px; border-radius: 10px; font-size: 13px; font-weight: 500;
+  background: var(--card); color: var(--text); border: 1px solid var(--border); border-left: 4px solid var(--accent);
+  box-shadow: 0 8px 24px rgba(0,0,0,.18); animation: toast-in .18s ease-out; transition: opacity .35s, transform .35s;
+}
+.toast.success { border-left-color: var(--success); }
+.toast.warning { border-left-color: var(--warn); }
+.toast.error { border-left-color: var(--danger); }
+.toast.leaving { opacity: 0; transform: translateX(12px); }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.creds-error { color: var(--danger); font-size: 12.5px; font-weight: 600; }
 .preflight-list { display: flex; flex-direction: column; gap: 6px; }
 .pf-item {
   display: grid; grid-template-columns: 12px 170px 1fr auto; gap: 10px; align-items: start;
@@ -609,6 +623,8 @@ code { background: var(--card-2); border: 1px solid var(--border); border-radius
 }
 .modal-close:hover { color: var(--text); }
 .modal-body { display: flex; flex-direction: column; gap: 8px; margin: 12px 0 16px; }
+/* .field's flex-basis is a width in rows; in this column it would become height. */
+.modal-body > .field { flex: 0 0 auto; }
 .branch-option {
   display: flex; align-items: center; gap: 10px;
   background: var(--card-2); border: 1px solid var(--border);
