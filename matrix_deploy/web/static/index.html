@@ -81,6 +81,11 @@
     </header>
 
     <div class="work">
+      <!-- Shown when the local server stops answering (console window closed) -->
+      <div class="setup-banner error server-banner" id="server-banner" hidden>
+        <span class="setup-banner-text"><strong>Matrix Deploy isn't running.</strong> Its console window was probably closed, so nothing on this page will work. Start <code>MatrixDeploy.exe</code> again &mdash; this page reconnects by itself once it's back (if the address changed, use the tab that opens instead).</span>
+      </div>
+
       <!-- Setup Check banner (shown only when something needs attention) -->
       <div class="setup-banner" id="setup-banner" hidden>
         <span class="setup-banner-text" id="setup-banner-text"></span>

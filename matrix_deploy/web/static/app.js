@@ -9,6 +9,40 @@ const state = {
 
 const el = (id) => document.getElementById(id);
 
+/* ---------- Server connection watchdog ---------- */
+// A network-level fetch failure ("TypeError: Failed to fetch") means the local
+// server is gone - almost always because its console window was closed. Show
+// a clear banner and poll until it's back instead of cryptic per-action errors.
+const rawFetch = window.fetch.bind(window);
+let serverDown = false;
+let serverPoll = null;
+function setServerDown(down) {
+  if (down === serverDown) return;
+  serverDown = down;
+  el("server-banner").hidden = !down;
+  clearInterval(serverPoll);
+  if (down) {
+    serverPoll = setInterval(async () => {
+      try {
+        const r = await rawFetch("/api/health", { cache: "no-store" });
+        if (r.ok) setServerDown(false);
+      } catch (_) { /* still down */ }
+    }, 3000);
+  } else if (typeof logTo === "function") {
+    logTo(GENERAL_TAB, "Reconnected to Matrix Deploy.", "success");
+  }
+}
+window.fetch = async (...args) => {
+  try {
+    const res = await rawFetch(...args);
+    setServerDown(false);
+    return res;
+  } catch (e) {
+    if (e instanceof TypeError) setServerDown(true);
+    throw e;
+  }
+};
+
 /* ---------- Theme ---------- */
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);

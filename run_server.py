@@ -22,6 +22,7 @@ import sys
 import threading
 import urllib.request
 import webbrowser
+from typing import Optional
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8420
@@ -42,13 +43,27 @@ def _find_open_port(host: str, preferred: int) -> int:
     raise RuntimeError(f"Could not find a free port near {preferred} on {host}")
 
 
-def _already_running(port: int) -> bool:
-    """True if a Matrix Deploy server already answers on ``port``."""
+def _is_matrix_deploy(port: int) -> bool:
+    """True if a Matrix Deploy server answers on ``port``."""
     try:
-        with urllib.request.urlopen(f"http://{HOST}:{port}/api/health", timeout=1) as resp:
+        with urllib.request.urlopen(f"http://{HOST}:{port}/api/health", timeout=0.5) as resp:
             return json.load(resp).get("app") == "matrix-deploy"
     except Exception:  # noqa: BLE001
         return False
+
+
+def _running_instance(preferred: int) -> Optional[int]:
+    """Port of an already-running Matrix Deploy near ``preferred`` (the same
+    range ``_find_open_port`` uses), so a second double-click reuses it even
+    if something else took the preferred port."""
+    for port in range(preferred, preferred + 50):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.2)
+            if sock.connect_ex((HOST, port)) != 0:
+                continue
+        if _is_matrix_deploy(port):
+            return port
+    return None
 
 
 def _exit(code: int) -> None:
@@ -97,8 +112,9 @@ def main() -> None:
     if config is None:
         _exit(1)
 
-    if _already_running(args.port):
-        url = f"http://{HOST}:{args.port}"
+    running = _running_instance(args.port)
+    if running:
+        url = f"http://{HOST}:{running}"
         print(f"Matrix Deploy is already running at {url}")
         if not args.no_browser:
             webbrowser.open(url)

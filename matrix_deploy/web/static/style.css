@@ -462,6 +462,7 @@ button { font-family: inherit; cursor: pointer; border: none; }
 }
 .setup-banner.error { border-color: var(--danger); background: var(--danger-soft); }
 .setup-banner-text { flex: 1 1 260px; font-weight: 500; }
+.server-banner { position: sticky; top: 0; z-index: 20; }
 .preflight-list { display: flex; flex-direction: column; gap: 6px; }
 .pf-item {
   display: grid; grid-template-columns: 12px 170px 1fr auto; gap: 10px; align-items: start;

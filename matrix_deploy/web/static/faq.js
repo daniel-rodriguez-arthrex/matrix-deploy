@@ -204,6 +204,13 @@ window.FAQ_SECTIONS = [
     title: "Troubleshooting",
     items: [
       {
+        q: "Everything fails with \"Failed to fetch\" / a red \"Matrix Deploy isn't running\" banner.",
+        a: "The page is still open but the app behind it stopped, usually because its console window was closed. Start " +
+          "<code>MatrixDeploy.exe</code> again. The page reconnects by itself within a few seconds. If a new tab opens on a " +
+          "different address (e.g. <code>:8421</code>), use that one and close the old tab. Only run one copy at a time: " +
+          "double-clicking the exe again just reopens the running one.",
+      },
+      {
         q: "Setup Check says \"Lab network\" can't reach the router.",
         a: "You're not on the lab network. Connect to the lab network or VPN, then click <b>Re-run check</b>. If only one room is unreachable, " +
           "it may just be powered off.",
