@@ -1,10 +1,11 @@
-"""Optional .env loading for prefill values (Qt-free).
+"""``.env`` loading/saving for prefill values and saved credentials.
 
-Reads connection fields and, if present, secrets (SSH/sudo password and the
-Artifactory token). Secrets loaded from .env are still kept out of the saved
-settings file; the .env file itself is gitignored. Storing secrets here is a
-convenience tradeoff (plaintext on disk) - leave them blank to keep the
-in-memory-only posture and type them in the GUI each session.
+Reads non-secret fields and, if present, secrets (SSH/sudo passwords,
+Artifactory/Jenkins tokens) from the shared root ``.env`` and each site
+profile's sibling ``<lab>.env``. The web UI's credentials dialog writes back
+here via ``save_env_values``. Storing secrets here is a convenience tradeoff
+(plaintext on disk, gitignored) - leave them blank to type them into the UI
+each session instead.
 """
 
 from __future__ import annotations
@@ -25,8 +26,7 @@ NON_SECRET_KEY_MAP = {
     "WEB_REPO": "web_repo",
 }
 
-# Secret keys and the field they map to. Loaded into the GUI but never written
-# to the persisted settings file. ``MATRIX_*`` aliases match the per-lab
+# Secret keys and the field they map to. ``MATRIX_*`` aliases match the per-lab
 # credential files exported by the Matrix Lab VS Code extension
 # (e.g. qa1lab.env / qa2lab.env) so those can be used verbatim as profile envs.
 SECRET_KEY_MAP = {
@@ -188,8 +188,8 @@ def load_env_secrets(path: Path | None = None) -> Dict[str, str]:
     """Load secret values from a .env file.
 
     Returns a dict keyed by field name (``ssh_password``, ``sudo_password``,
-    ``artifactory_token``), containing only present, non-empty values. These
-    are intended to prefill GUI fields and must never be persisted.
+    ``artifactory_token``, ``jenkins_token``), containing only present,
+    non-empty values, used to prefill the UI's credential fields.
     """
     raw = parse_env_file(path or default_env_path())
     return _collect(raw, SECRET_KEY_MAP)

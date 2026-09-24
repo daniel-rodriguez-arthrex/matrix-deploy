@@ -1,10 +1,8 @@
 """FastAPI app for the Matrix Deploy localhost web UI.
 
-Deliberately Qt-free: reuses ``AppConfig``/``Deployer``/``ArtifactoryClient``/
-``JenkinsClient`` exactly as ``matrix_deploy/workers.py`` does for the PyQt5
-GUI, but replaces ``QThread``/``pyqtSignal`` with a plain ``threading.Thread``
-per job that pushes events onto a ``queue.Queue``, drained by a WebSocket
-handler. Intended to run on ``127.0.0.1`` only for a single local user - see
+Wraps ``AppConfig``/``Deployer``/``ArtifactoryClient``/``JenkinsClient`` in a
+plain ``threading.Thread`` per job that pushes events onto a ``queue.Queue``,
+drained by a WebSocket handler. Intended to run on ``127.0.0.1`` only for a single local user - see
 ``run_server.py``.
 """
 
@@ -50,10 +48,10 @@ from .tunnel import (
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ARTIFACTS_DIR = Path(tempfile.gettempdir()) / "matrix_deploy_web_artifacts"
-# Default folder for downloaded SWU builds (mirrors the desktop app's CACHE_DIR).
+# Default folder for downloaded SWU builds.
 DEFAULT_SWU_CACHE_DIR = Path.home() / "Desktop" / "latest-matrix-wrynose"
 
-# Mirrors workers.MAX_CONCURRENT_SWU_UPLOADS: rooms share one physical
+# Rooms share one physical
 # uplink through the router, so cap simultaneous SWU uploads regardless of
 # overall room concurrency.
 MAX_CONCURRENT_SWU_UPLOADS = 1
@@ -674,8 +672,7 @@ class StreamLogsRequest(BaseModel):
 
 
 def create_app(config: Optional[AppConfig] = None) -> FastAPI:
-    """Build the FastAPI app. ``config`` defaults to ``AppConfig.load()``
-    (the same config file the PyQt5 GUI reads)."""
+    """Build the FastAPI app. ``config`` defaults to ``AppConfig.load()``."""
     app_config = config or AppConfig.load()
     jobs = JobManager()
     tunnels = TunnelManager()
@@ -783,7 +780,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     def setup_info() -> Dict[str, Any]:
         """Connection details plus ``.env`` prefill values (non-secret and,
         for a single local user, secret) so the web UI can prefill setup
-        fields the same way the desktop GUI does. Localhost-only by design."""
+        fields. Localhost-only by design."""
         # Merge the shared root .env (Artifactory/Jenkins etc.) with the
         # active profile's sibling .env (per-lab SSH/sudo creds), letting the
         # profile override shared values where they overlap.
@@ -895,8 +892,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     @app.post("/api/room/nms-password")
     def nms_password(req: NmsPasswordRequest) -> Dict[str, Any]:
         """Fetch a room's default NMS/admin password (from act-mfg-eeprom) so
-        the UI can copy it to the clipboard when opening the demonstrator,
-        mirroring the desktop app's 'Open GUI' behavior."""
+        the UI can copy it to the clipboard when opening the demonstrator."""
         room = _one_room(req.room_number)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         deployer = Deployer(

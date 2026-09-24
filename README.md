@@ -1,32 +1,37 @@
 # Matrix Deploy
 
-A modular tool for deploying SWU firmware updates to Matrix operating rooms over
-SSH/SCP, running system/service actions, and editing each room's live
-`matrix.api.config.json` directly. Available as a PyQt5 desktop app and a
-localhost web UI (see `ROADMAP_3.0.md`).
+A localhost web tool for deploying SWU firmware updates to Matrix operating
+rooms over SSH/SCP, running system/service actions, deploying the Matrix web
+app, and editing each room's live `matrix.api.config.json` directly.
+
+The PyQt5 desktop app was retired in favor of the web UI. It is preserved at
+the git tag `v2-last-pyqt`.
 
 ## Project Structure
 
 ```
 matrix-deploy/
-├── run_gui.py                  # Desktop GUI entry point
-├── run_server.py               # Localhost web UI entry point
+├── run_server.py               # Entry point (also the MatrixDeploy.exe entry point)
+├── build_exe.ps1               # Builds the distributable folder + zip
 ├── requirements.txt
 ├── config/
-│   └── deploy_config.json      # Rooms, connection, Artifactory settings (edit me)
+│   ├── deploy_config.example.json
+│   ├── <lab>.json              # Site profiles: rooms, connection, Artifactory (gitignored)
+│   └── <lab>.env               # Per-lab SSH/sudo passwords (gitignored)
 └── matrix_deploy/
-    ├── config.py               # Config loading + data models (Qt-free)
-    ├── ssh_client.py           # SSH/SCP helpers + wait-for-reboot (Qt-free)
-    ├── artifactory.py          # Download latest SWU build (Qt-free)
-    ├── deployer.py             # SWU deploy + live config + actions (Qt-free)
-    ├── workers.py              # Qt threads wrapping the logic
-    ├── gui.py                  # Qt UI only
-    └── web/                    # FastAPI localhost web UI (Qt-free)
+    ├── config.py               # Profile loading + data models
+    ├── env_settings.py         # .env loading/saving
+    ├── preflight.py            # Setup Check
+    ├── ssh_client.py           # SSH/SCP helpers + wait-for-reboot
+    ├── artifactory.py          # Download latest SWU build
+    ├── jenkins.py              # Trigger Embedded Builder builds
+    ├── deployer.py             # SWU deploy + live config + actions
+    ├── webapp_builder.py       # Build the web app/backend from source
+    └── web/                    # FastAPI server + static UI (FAQ content in static/faq.js)
 ```
 
-**Design principle:** All deployment logic is Qt-free and lives in the service
-modules. Only `workers.py` and `gui.py` depend on PyQt5, so the core is testable
-and reusable from the CLI and the web UI.
+All deployment logic lives in the core modules. `web/` is a thin HTTP/WebSocket
+layer over them.
 
 **Config workflow:** there are no golden templates. Each room's
 `matrix.api.config.json` is edited live — load it from the room, edit it, then
@@ -40,13 +45,7 @@ pip install -r requirements.txt
 
 ## Usage
 
-Desktop GUI:
-
-```powershell
-python run_gui.py
-```
-
-Localhost web UI (binds to 127.0.0.1 only, opens your browser):
+Start the web UI (binds to 127.0.0.1 only and opens your browser):
 
 ```powershell
 python run_server.py
@@ -99,56 +98,43 @@ When frozen, `config\` and `.env` are always read from the folder that holds
 
 ### Workflow
 
-1. Fill in **Connection Settings** / **Credentials** (SSH user, sudo password).
-2. For downloads, enter your **Artifactory email + token**.
-3. Either **Browse**/enter an SWU file path or click **Download Latest**.
-4. Check the **Operating Rooms** to target.
-5. Click **Start Deployment** (SWU firmware). Use the **Config** tab/editor to
-   change a room's live config.
-6. Use **Cancel** to abort cleanly between steps.
+1. Pick the lab in the **Site** dropdown and check **Settings > Setup Check**.
+2. Tick the target rooms in the sidebar.
+3. On **Deploy**, click **Download Latest SWU** or **Browse** to an SWU file.
+4. Choose a concurrency and click **Start Deployment**.
+5. Use **Config** to edit a room's live config. **Actions**, **Logs**,
+   **Web App** and **Tunnels** cover everything else. The **FAQ** tab explains
+   every button.
+6. **Cancel** aborts cleanly between steps.
 
 ## Configuration
 
-All environment-specific values live in `config/deploy_config.json`, which is
-**gitignored** since it typically contains internal network addresses. Copy
-the committed example to get started:
+Each lab is a **site profile** in `config/`: any `*.json` with `connection` and
+`rooms` sections (e.g. `qa1lab.json`). The display name comes from `site.name`.
+Profiles are **gitignored** because they contain internal network addresses.
+Start from the example:
 
 ```powershell
-Copy-Item config\deploy_config.example.json config\deploy_config.json
+Copy-Item config\deploy_config.example.json config\mylab.json
 ```
 
-Then edit `config/deploy_config.json`:
-
-- `connection` - router IP, SSH user, port base, service name, SWU port,
-  and `same_physical_host` (see below).
-- `artifactory` - URL, repo, build path, build name, branch filter.
-- `rooms` - the room registry (number, room_id, display name).
+- `connection`: router IP, SSH user, port base, service names, SWU port,
+  `same_physical_host` (see below), and the remote web-app paths.
+- `artifactory`: URL, repo, build path/name, branch filter, optional `branches`.
+- `rooms`: the room registry (number, room_id, display name, optional overrides).
 
 No code changes are needed to retarget a different environment.
 
-### Optional `.env` prefill
+### Credentials (`.env` files)
 
-To avoid re-typing fields each launch, copy `.env.example` to `.env` and set
-values. On startup these prefill the matching GUI fields and take precedence
-over the saved settings file. `.env` is gitignored.
+| File | Holds | Written by |
+|---|---|---|
+| `config/<lab>.env` | That lab's `SSH_PASSWORD` / `SUDO_PASSWORD` (`MATRIX_*` aliases accepted) | The **Edit saved credentials** dialog |
+| `.env` (next to `run_server.py` / `MatrixDeploy.exe`) | `ARTIFACTORY_EMAIL` / `ARTIFACTORY_TOKEN`, `JENKINS_USERNAME` / `JENKINS_TOKEN`, optional `SWU_FILE`, `BACKEND_REPO`, `WEB_REPO` | The **Edit saved credentials** dialog |
 
-Non-secret keys:
-
-- `ROUTER_IP`
-- `SSH_USERNAME`
-- `ARTIFACTORY_EMAIL`
-- `SWU_FILE` (optional default path)
-
-Secret keys (optional, **plaintext on disk** - leave blank to opt out):
-
-- `SSH_PASSWORD`
-- `SUDO_PASSWORD`
-- `ARTIFACTORY_TOKEN`
-
-If you set the secret keys, they prefill the GUI password fields each launch.
-The app still never writes them to its settings file, and `.env` is gitignored
-- but they do live in plaintext in `.env`, so only use this on a trusted
-machine.
+See `.env.example` for all keys. Values in these files are **plaintext on
+disk** and prefill the UI on launch. Leave them blank to type credentials into
+the UI each session, where they stay in memory only.
 
 ## Web App Build & Deploy
 
@@ -174,8 +160,8 @@ ported from the standalone `matrix-electron-web-deployer` tool.
 
 ## Important: Shared Physical Host
 
-In this environment every "room" is a different **SSH port on the same box**
-(`10.101.44.150`). Two implications, both handled by the tool:
+In some labs every "room" is a different **SSH port on the same box**
+(`same_physical_host: true`). Two implications, both handled by the tool:
 
 1. **Unique remote filenames** - each room's SWU uploads to
    `update-or{N}-<name>.swu` so parallel runs never clobber each other.
@@ -184,14 +170,12 @@ In this environment every "room" is a different **SSH port on the same box**
 
 ## Security
 
-- The app itself never writes SSH password, sudo password, or the Artifactory
-  token to disk. The settings file (`~/.matrix_deploy_settings.json`) stores
-  only non-secret fields (router IP, username, last file paths, Artifactory
-  email).
-- By default secrets stay **in memory only** (typed into the GUI each session).
-- **Opt-in exception:** if you put them in `.env` (see *Optional `.env`
-  prefill*), they live in plaintext in that gitignored file and prefill the GUI
-  on launch. Only do this on a trusted machine.
+- The server binds to `127.0.0.1` only and is meant for a single local user.
+- Credentials typed into the UI stay **in memory only**. Credentials saved via
+  **Edit saved credentials** go to the `.env` files above in plaintext, so only
+  do that on a trusted machine.
+- The distributable build never includes the root `.env`, and strips lab `.env`
+  files down to SSH/sudo passwords (see *Distributing to coworkers*).
 
 ### What's gitignored and why
 
@@ -201,13 +185,15 @@ these**:
 
 | Path | Reason |
 |---|---|
-| `.env` | Plaintext SSH/sudo password + Artifactory token, if you opt in |
+| `.env` | Plaintext Artifactory/Jenkins tokens, if saved |
+| `config/*.env` | Plaintext per-lab SSH/sudo passwords |
 | `*.key`, `*.pem` | Private keys / certs (e.g. NMS root CA material) |
-| `config/deploy_config.json` | Real router IP + per-room network addresses |
-| `build/`, `dist/` | PyInstaller output |
+| `config/*.json` (except the example) | Real router IP + per-room network addresses |
+| `build/`, `dist/`, `*.spec` | PyInstaller output |
 
-Before pushing to a public remote, always run `git status` and confirm none
-of the above show up as tracked/staged.
+Before pushing, always run `git status` and confirm none of the above show up
+as tracked/staged. Keep the remote **private**: the code itself describes
+internal hosts and device procedures.
 
 ## Notes on the SWU process
 
