@@ -71,6 +71,7 @@
         <button class="tab" data-tab="actions">Actions</button>
         <button class="tab" data-tab="logs">Logs</button>
         <button class="tab" data-tab="tunnels">Tunnels</button>
+        <button class="tab" data-tab="router-ports">Router Ports</button>
         <button class="tab" data-tab="settings">Settings</button>
         <button class="tab" data-tab="faq">FAQ</button>
       </nav>
@@ -390,6 +391,55 @@
         </div>
       </section>
 
+      <!-- ROUTER PORTS TAB -->
+      <section class="tab-panel" data-panel="router-ports">
+        <div class="card accent">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="14" width="20" height="7" rx="1"/><path d="M6 14v-3a6 6 0 0 1 12 0v3M6 18h.01M10 18h.01"/></svg> Router Port Forwarding</h2><span class="badge subtle" id="router-ports-router">&nbsp;</span></div>
+          <p class="hint">NAT port-forwarding plan for this site's router (Cisco, <code>ip nat inside source static</code>). External port = base + room number: SSH 200+n, SWU 300+n, API/Cert 10000+n, NMS 11000+n. Switch site in the sidebar to see Lab 1 (10.101.44.150) vs Lab 2 (10.101.60.150). Paste the generated commands into the router in <code>configure terminal</code>, then <code>end</code> / <code>write memory</code>.</p>
+          <div class="config-bar">
+            <button class="ghost sm" id="router-ports-refresh">Refresh</button>
+            <button class="action" id="router-ports-copy">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy NAT Commands
+            </button>
+            <span class="config-status" id="router-ports-status"></span>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table" id="router-ports-table">
+              <thead>
+                <tr><th>Room</th><th>Room IP</th><th>SSH</th><th>SWU</th><th>API / Cert</th><th>NMS</th></tr>
+              </thead>
+              <tbody id="router-ports-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg> Generated NAT Commands</h2></div>
+          <p class="hint">Full Cisco config block for this site, ready to paste into the router's terminal.</p>
+          <textarea id="router-ports-script" class="code-editor compact" spellcheck="false" readonly></textarea>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/></svg> Apply to Router</h2><span class="badge subtle">writes live router config</span></div>
+          <p class="hint">Opens an SSH session to the router above, enters privileged/config mode, runs the commands shown above, then <code>write memory</code>. Review the generated commands first &mdash; this changes real NAT rules on the lab router.</p>
+          <div class="field-row">
+            <label class="field"><span>Router SSH username</span><input type="text" id="router-admin-username" autocomplete="off" /></label>
+            <label class="field"><span>Router SSH password</span><input type="password" id="router-admin-password" autocomplete="off" /></label>
+            <label class="field"><span>Enable password</span><input type="password" id="router-enable-password" autocomplete="off" placeholder="if required" /></label>
+          </div>
+          <div class="action-grid">
+            <label class="checkline"><input type="checkbox" id="router-apply-confirm" /> <span>I've reviewed the commands above and want to apply them to the live router</span></label>
+          </div>
+          <div class="action-grid" style="margin-top:6px;">
+            <button class="action warn" id="router-apply-nat" disabled>
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0M12 2v10"/></svg>
+              Apply to Router
+            </button>
+          </div>
+        </div>
+      </section>
+
       <!-- SETTINGS TAB -->
       <section class="tab-panel" data-panel="settings">
         <div class="card" id="preflight-card">
@@ -509,6 +559,14 @@
         <div class="field-row" style="margin-top:8px;">
           <label class="field"><span>Jenkins username</span><input type="text" id="creds-jenkins-user" autocomplete="off" /></label>
           <label class="field"><span>Jenkins token</span><input type="password" id="creds-jenkins-token" autocomplete="off" /></label>
+        </div>
+      </details>
+      <details id="creds-router">
+        <summary class="hint" style="cursor:pointer;">Router admin (optional, per-lab &mdash; needed for Router Ports &rarr; Apply to Router)</summary>
+        <div class="field-row" style="margin-top:8px;">
+          <label class="field"><span>Router SSH username</span><input type="text" id="creds-router-user" autocomplete="off" /></label>
+          <label class="field"><span>Router SSH password</span><input type="password" id="creds-router-pass" autocomplete="off" /></label>
+          <label class="field"><span>Enable password</span><input type="password" id="creds-router-enable" autocomplete="off" /></label>
         </div>
       </details>
       <span class="creds-error" id="creds-error" role="alert" hidden></span>

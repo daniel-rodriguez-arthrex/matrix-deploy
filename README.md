@@ -72,7 +72,7 @@ This builds the web UI into `dist\MatrixDeploy\` and zips it to
 
 | Item | Notes |
 |---|---|
-| `MatrixDeploy.exe`, `_internal\` | The app. Double-click to start. It opens in its own Chrome/Edge app window, with no console. |
+| `MatrixDeploy.exe`, `_internal\` | The app. Double-click to start. A console window shows status, and the UI opens in its own Chrome/Edge app window. |
 | `config\<lab>.json` | Every site profile in your `config\` folder. |
 | `config\<lab>.env` | **Only** `SSH_PASSWORD`/`SUDO_PASSWORD` (and `MATRIX_` aliases). All other keys in your lab `.env` are dropped. |
 | `START HERE.txt` | Quick start for coworkers. |
@@ -84,8 +84,8 @@ coworker's machine.
 
 On every launch a **Setup Check** runs and shows under **Settings > Setup
 Check**, with a red banner when something is blocking. If the app can't start
-at all (e.g. no site profile), a message box explains why. The exe logs to
-`matrixdeploy.log` next to itself. It checks:
+at all (e.g. no site profile), its console window explains why and stays open
+until Enter is pressed. It checks:
 
 - The app folder is writable and isn't running from inside a zip.
 - The bundled UI/golden files are present.

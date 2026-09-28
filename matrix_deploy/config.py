@@ -25,6 +25,18 @@ class Room:
     def ssh_port(self, port_base: int) -> int:
         return port_base + self.number
 
+    def swu_external_port(self, port_base: int = 300) -> int:
+        """Router-forwarded SWU (swupdate-client) port for this room."""
+        return port_base + self.number
+
+    def api_external_port(self, port_base: int = 10000) -> int:
+        """Router-forwarded matrix-api/cert port for this room."""
+        return port_base + self.number
+
+    def nms_external_port(self, port_base: int = 11000) -> int:
+        """Router-forwarded NMS demonstrator port for this room."""
+        return port_base + self.number
+
     def api_url(self) -> str:
         """Inter-operating-room API URL based on room number."""
         return f"https://localhost:{10000 + self.number}"
@@ -88,6 +100,12 @@ class ConnectionConfig:
     remote_webapp_app_folder: str = "/opt/matrix-api-app"
     remote_webapp_node_module: str = "/usr/lib/node_modules/matrix.api"
     webapp_service_unit_path: str = "/usr/lib/systemd/system/matrix-api.service"
+    # Router NAT port-forwarding bases (see ROUTER_PORT_FORWARDING_PATTERN.md):
+    # external port = base + room number, forwarded to the room's internal
+    # SSH/SWU/API/NMS ports on the router's WAN interface.
+    swu_port_base: int = 300
+    nms_port_base: int = 11000
+    router_wan_interface: str = "GigabitEthernet0/0/0"
 
 
 @dataclass(frozen=True)

@@ -51,9 +51,9 @@ Write-Host "Installing build dependencies..."
 Invoke-Native "pip install" { python -m pip install --disable-pip-version-check --upgrade pyinstaller -r requirements.txt }
 
 Write-Host "Building folder app..."
-# Must stay --console: SentinelOne deletes PyInstaller --windowed builds as
-# soon as they're written. run_server.py closes its own console window when
-# double-clicked, so users still only see the app window.
+# Plain --console build. SentinelOne deleted a --windowed build on sight, and
+# flagged a build that hid its own console. Don't add either back; get the
+# exe signed/allowlisted by IT instead.
 Invoke-Native "PyInstaller" { python -m PyInstaller --noconfirm --clean --console --name MatrixDeploy `
   --workpath "$work\build" --specpath "$work" --distpath "$stage" `
   --add-data "$PSScriptRoot\matrix_deploy\web\static;matrix_deploy\web\static" `
@@ -93,10 +93,11 @@ MATRIX DEPLOY - QUICK START
    Don't run it from inside the .zip, and don't put it in Program Files.
 
 2. Double-click MatrixDeploy.exe.
+   A small console window opens (leave it alone, you can minimize it), and
    Matrix Deploy opens in its own window (it uses Chrome or Edge behind the
-   scenes). Close that window to quit. If a deploy or other job is still
-   running, it finishes first, then quits. Double-clicking again while it's
-   open just brings up another window.
+   scenes). Close the Matrix Deploy window to quit; the console closes by
+   itself. If a deploy or other job is still running, it finishes first.
+   Double-clicking again while it's open just brings up another window.
 
 3. In the app, open Settings > Setup Check.
      Red   = must fix. Use the button next to the item.
@@ -119,8 +120,10 @@ entered your own tokens.
 Troubleshooting
   - "Lab network" warning: connect to the lab network/VPN.
   - Windows SmartScreen "protected your PC": click More info > Run anyway.
-  - Nothing opens, or it closes right away: a message box explains why.
-    Details are also in matrixdeploy.log in this folder.
+  - It doesn't start: the console window shows why and stays open until
+    you press Enter.
+  - The exe disappears or gets blocked by security software: don't
+    restore it yourself. Contact IT.
 "@ | Set-Content -Path (Join-Path $distDir "START HERE.txt") -Encoding UTF8
 
 # --- Safety net: no personal tokens may ship --------------------------------

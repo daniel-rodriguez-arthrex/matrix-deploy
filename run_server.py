@@ -6,9 +6,10 @@ window (Chrome/Edge ``--app`` mode: no tabs or address bar, falling back to
 the default browser). Never bind this to 0.0.0.0: the server holds SSH/sudo/
 Artifactory secrets in memory and is designed for a single local user.
 
-The packaged exe has no console window: it quits by itself once its last
-window is closed and no job is running, logs to ``matrixdeploy.log`` next to
-the exe, and reports startup problems in a message box.
+The packaged exe is a plain console app: its console window stays visible
+(it never hides or detaches from it) and shows startup output and errors.
+The app quits by itself - closing that console too - once its last app window
+is closed and no job is running.
 
 Usage:
     python run_server.py [--port 8420] [--no-browser] [--check] [--keep-running]
@@ -37,41 +38,16 @@ FROZEN = getattr(sys, "frozen", False)
 IDLE_EXIT_AFTER = 10
 
 
-def _setup_stdio() -> bool:
-    """Make the packaged app a single window. The exe is a console-type build
-    (SentinelOne quarantines PyInstaller's windowed builds on sight), so when
-    it was double-clicked - i.e. it's the only process on its console - it
-    detaches, which closes that console window, and logs to
-    ``matrixdeploy.log`` instead. Started from a terminal, it keeps printing
-    there (e.g. ``--check``). Returns True if output goes to a console."""
-    if not (FROZEN and os.name == "nt"):
-        return True
-    import ctypes
-
-    kernel32 = ctypes.windll.kernel32
-    procs = (ctypes.c_uint * 4)()
-    if kernel32.GetConsoleProcessList(procs, 4) > 1:
-        return True
-    kernel32.FreeConsole()
-    try:
-        from matrix_deploy.config import app_dir
-
-        sys.stdout = sys.stderr = open(app_dir() / "matrixdeploy.log", "w", buffering=1, encoding="utf-8")
-    except OSError:
-        sys.stdout = sys.stderr = open(os.devnull, "w")
-    return False
-
-
-HAS_CONSOLE = _setup_stdio()
-
-
-def _alert(text: str, error: bool = True) -> None:
-    """Show ``text`` to the user: a message box for the windowed exe, else print."""
-    print(text, file=sys.stderr if error else sys.stdout)
-    if FROZEN and not HAS_CONSOLE and os.name == "nt":
-        import ctypes
-
-        ctypes.windll.user32.MessageBoxW(None, text, "Matrix Deploy", 0x10 if error else 0x40)
+def _fail(text: str) -> None:
+    """Print a startup error and exit. When double-clicked, wait for Enter
+    first so the console doesn't vanish before the user can read it."""
+    print(text, file=sys.stderr)
+    if FROZEN:
+        try:
+            input("\nPress Enter to close this window...")
+        except EOFError:
+            pass
+    sys.exit(1)
 
 
 def _find_open_port(host: str, preferred: int) -> int:
@@ -164,15 +140,10 @@ def main() -> None:
     if args.check:
         checks = run_preflight(config, config_error, network_timeout=2.0)
         report = f"Matrix Deploy - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
-        ok = summarize(checks)["ok"]
-        if FROZEN and not HAS_CONSOLE:
-            _alert(report, error=not ok)
-        else:
-            print(report)
-        sys.exit(0 if ok else 1)
+        print(report)
+        sys.exit(0 if summarize(checks)["ok"] else 1)
     if config is None:
-        _alert("Matrix Deploy can't start:\n\n" + format_report(run_preflight(None, config_error, network=False)))
-        sys.exit(1)
+        _fail("Matrix Deploy can't start:\n\n" + format_report(run_preflight(None, config_error, network=False)))
 
     running = _running_instance(args.port)
     if running:
@@ -193,10 +164,9 @@ def main() -> None:
 
         from matrix_deploy.web.server import create_app
     except ImportError as exc:
-        _alert(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
-        sys.exit(1)
+        _fail(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
 
-    # Log-only summary; the network check runs in the app (Settings > Setup Check).
+    # Console summary; the network check runs in the app (Settings > Setup Check).
     print(f"Matrix Deploy - Setup Check\n{format_report(run_preflight(config, network=False))}")
     app = create_app(config)
     server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning" if FROZEN else "info"))
@@ -213,7 +183,8 @@ def main() -> None:
         threading.Thread(target=watchdog, daemon=True).start()
 
     print(f"\nMatrix Deploy is running at {url}")
-    print("Close the app window to quit." if auto_exit else "Press Ctrl+C to stop.")
+    print("This window closes by itself when you close the Matrix Deploy window."
+          if auto_exit else "Press Ctrl+C to stop.")
     server.run()
 
 

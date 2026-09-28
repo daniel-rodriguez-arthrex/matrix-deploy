@@ -380,6 +380,51 @@ async function loadConnectionInfo() {
     `${info.router_ip} \u00b7 ${info.ssh_username} \u00b7 ${info.same_physical_host ? "shared host" : "independent"}`;
 }
 
+/* ---------- Router Ports ---------- */
+let routerPortsScript = "";
+async function loadRouterPorts() {
+  const data = await (await fetch("/api/router-ports")).json();
+  routerPortsScript = data.nat_script;
+  el("router-ports-router").textContent = `${data.site_name || "Site"} \u00b7 ${data.router_ip} \u00b7 ${data.wan_interface}`;
+  el("router-ports-tbody").innerHTML = data.rooms.map((r) => `
+    <tr>
+      <td>${escapeHtml(roomName(r))}</td>
+      <td class="mono">${escapeHtml(r.room_id)}</td>
+      <td class="mono">${data.router_ip}:${r.ssh_port}</td>
+      <td class="mono">${data.router_ip}:${r.swu_port}</td>
+      <td class="mono">${data.router_ip}:${r.api_port}</td>
+      <td class="mono">${data.router_ip}:${r.nms_port}</td>
+    </tr>
+  `).join("");
+  el("router-ports-script").value = routerPortsScript;
+}
+el("router-ports-refresh").addEventListener("click", () => {
+  loadRouterPorts().catch((e) => logLine(`Failed to load router ports: ${e}`, "error"));
+});
+el("router-ports-copy").addEventListener("click", async () => {
+  const ok = await copyToClipboard(routerPortsScript);
+  el("router-ports-status").textContent = ok ? "Copied to clipboard." : "Copy failed \u2014 select the text manually.";
+});
+el("router-apply-confirm").addEventListener("change", (e) => {
+  el("router-apply-nat").disabled = !e.target.checked;
+});
+el("router-apply-nat").addEventListener("click", () => {
+  const router_admin_username = el("router-admin-username").value.trim();
+  const router_admin_password = el("router-admin-password").value;
+  const router_enable_password = el("router-enable-password").value || null;
+  if (!router_admin_username || !router_admin_password) {
+    logLine("Enter the router SSH username and password first.", "warning");
+    return;
+  }
+  el("router-apply-confirm").checked = false;
+  el("router-apply-nat").disabled = true;
+  startJob(
+    "/api/router/apply-nat",
+    { router_admin_username, router_admin_password, router_enable_password },
+    { needRooms: false, title: "Apply Router NAT" }
+  );
+});
+
 /* ---------- Site profiles ---------- */
 async function loadProfiles() {
   const data = await (await fetch("/api/profiles")).json();
@@ -409,7 +454,7 @@ el("site-select").addEventListener("change", async (e) => {
     const d = await res.json();
     logLine(`Switched site to ${d.active_name}.`, "success");
     // Reload everything for the new site; force-refresh credential fields.
-    await Promise.all([loadRooms(), loadConnectionInfo(), loadSetup(true), loadPreflight()]);
+    await Promise.all([loadRooms(), loadConnectionInfo(), loadRouterPorts(), loadSetup(true), loadPreflight()]);
   } catch (err) {
     logLine(`Site switch failed: ${err}`, "error");
   }
@@ -470,6 +515,9 @@ async function loadSetup(force = false) {
   prefill("sudo-password", sec.sudo_password, force);
   prefill("artifactory-token", sec.artifactory_token, force);
   prefill("jenkins-token", sec.jenkins_token, force);
+  prefill("router-admin-username", p.router_admin_username, force);
+  prefill("router-admin-password", sec.router_admin_password, force);
+  prefill("router-enable-password", sec.router_enable_password, force);
 
   // SWU download folder: prefer the .env SWU_FILE dir if given, else the
   // server's default cache folder. Only fill when empty so edits stick.
@@ -489,6 +537,9 @@ const CREDS_FIELDS = {
   "creds-art-token": ["secrets", "artifactory_token"],
   "creds-jenkins-user": ["prefill", "jenkins_username"],
   "creds-jenkins-token": ["secrets", "jenkins_token"],
+  "creds-router-user": ["prefill", "router_admin_username"],
+  "creds-router-pass": ["secrets", "router_admin_password"],
+  "creds-router-enable": ["secrets", "router_enable_password"],
 };
 function openCredsModal() {
   const s = state.setup;
@@ -1480,6 +1531,9 @@ const ID_TOOLTIPS = {
   "trigger-build": "Trigger a new Embedded Builder Jenkins build (matrix / wrynose).",
   "reload-setup": "Re-read prefill values from your .env file.",
   "edit-creds": "Change the SSH/sudo passwords saved for this lab, or the shared Artifactory/Jenkins credentials.",
+  "router-ports-refresh": "Reload the port plan and generated commands for the active site's router.",
+  "router-ports-copy": "Copy the full Cisco NAT config block to the clipboard.",
+  "router-apply-nat": "SSH into the router, enter config mode, run the NAT commands above, then write memory. Only enabled after you tick the confirm box.",
   "select-all": "Select every room.",
   "select-none": "Deselect every room.",
   "theme-toggle": "Switch between dark and light theme.",
@@ -1507,6 +1561,7 @@ el("reload-setup").addEventListener("click", () => {
 loadProfiles().catch((e) => logLine(`Failed to load profiles: ${e}`, "error"));
 loadRooms().catch((e) => logLine(`Failed to load rooms: ${e}`, "error"));
 loadConnectionInfo().catch((e) => logLine(`Failed to load connection info: ${e}`, "error"));
+loadRouterPorts().catch((e) => logLine(`Failed to load router ports: ${e}`, "error"));
 loadSetup().catch((e) => logLine(`Failed to load setup: ${e}`, "error"));
 loadPreflight();
 refreshTunnels().catch(() => {});

@@ -52,8 +52,8 @@
     if (waited > 45) {
       document.getElementById("box").classList.add("err");
       document.getElementById("msg").textContent =
-        "Matrix Deploy didn't start. Close this window and try again. If it keeps happening, " +
-        "check matrixdeploy.log in the MatrixDeploy folder.";
+        "Matrix Deploy didn't start. Check its console window for the reason, then close this " +
+        "window and try again.";
       return;
     }
     if (waited > 8) document.getElementById("msg").textContent = "Still starting\u2026 (first launch can take a little longer)";

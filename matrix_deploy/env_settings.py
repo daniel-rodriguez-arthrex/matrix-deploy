@@ -27,6 +27,7 @@ NON_SECRET_KEY_MAP = {
     "WEB_REPO": "web_repo",
     "WEBAPP_DIST": "webapp_dist",
     "WEBAPP_WEB": "webapp_web",
+    "ROUTER_ADMIN_USERNAME": "router_admin_username",
 }
 
 # Per-machine folder settings (Settings > Local folders). Saved to the root
@@ -45,6 +46,8 @@ SECRET_KEY_MAP = {
     "ARTIFACTORY_TOKEN": "artifactory_token",
     "ARTIFACTORY_API_KEY": "artifactory_token",
     "JENKINS_TOKEN": "jenkins_token",
+    "ROUTER_ADMIN_PASSWORD": "router_admin_password",
+    "ROUTER_ENABLE_PASSWORD": "router_enable_password",
 }
 
 ENV_KEY_MAP = {**NON_SECRET_KEY_MAP, **SECRET_KEY_MAP}

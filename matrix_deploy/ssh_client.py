@@ -307,4 +307,79 @@ def wait_for_reboot(
 
         time.sleep(5)
 
+
+def run_cisco_config_commands(
+    client: paramiko.SSHClient,
+    commands: list,
+    enable_password: Optional[str] = None,
+    log: Optional[Logger] = None,
+) -> str:
+    """Run config commands on a Cisco IOS-style device over an interactive
+    SSH shell.
+
+    ``exec_command`` only runs one-shot EXEC commands and can't reach
+    privileged/config mode on IOS, so this drives an ``invoke_shell`` session
+    instead: enters privileged EXEC (sending ``enable_password`` if the
+    device prompts for one), then ``configure terminal``, each command in
+    turn, ``end``, and ``write memory``. Returns the full captured transcript
+    and streams each line to ``log`` as it arrives.
+
+    Raises ``SSHError`` if the device asks for an enable password that
+    wasn't provided.
+    """
+    chan = client.invoke_shell()
+    chan.settimeout(10)
+    transcript: list = []
+
+    def _drain(wait: float) -> str:
+        time.sleep(wait)
+        buf = b""
+        while True:
+            got = False
+            try:
+                while chan.recv_ready():
+                    buf += chan.recv(65536)
+                    got = True
+            except Exception:  # noqa: BLE001
+                break
+            if not got:
+                break
+        return strip_ansi(buf.decode(errors="replace"))
+
+    def _send(cmd: str, wait: float = 0.8) -> str:
+        chan.send(cmd + "\n")
+        out = _drain(wait)
+        transcript.append(out)
+        if log:
+            for line in out.splitlines():
+                line = line.strip()
+                if line:
+                    log(line, "detail")
+        return out
+
+    try:
+        banner = _drain(1.2)
+        transcript.append(banner)
+        if log:
+            for line in banner.splitlines():
+                if line.strip():
+                    log(line.strip(), "detail")
+
+        enable_out = _send("enable")
+        if "password" in enable_out.lower():
+            if not enable_password:
+                raise SSHError("Router prompted for an enable password, but none was provided.")
+            _send(enable_password)
+
+        _send("terminal length 0")
+        _send("configure terminal")
+        for command in commands:
+            _send(command)
+        _send("end")
+        _send("write memory", wait=2.0)
+    finally:
+        chan.close()
+
+    return "".join(transcript)
+
     return False

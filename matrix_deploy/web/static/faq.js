@@ -13,7 +13,8 @@ window.FAQ_SECTIONS = [
         q: "I just got the MatrixDeploy folder. What do I do first?",
         a: "<ul>" +
           "<li>Extract the whole zip somewhere you own (Documents or Desktop), not Program Files, and don't run it from inside the zip.</li>" +
-          "<li>Double-click <code>MatrixDeploy.exe</code>. Matrix Deploy opens in its own window. Closing that window quits the app. " +
+          "<li>Double-click <code>MatrixDeploy.exe</code>. A small console window opens (just leave it or minimize it) and Matrix Deploy " +
+          "opens in its own window. Closing the Matrix Deploy window quits the app, and the console closes by itself. " +
           "If a job is still running, it finishes first.</li>" +
           "<li>Go to <b>Settings &rarr; Setup Check</b>. Fix anything red with the button next to it. Amber items only affect optional features.</li>" +
           "</ul>",
@@ -23,8 +24,8 @@ window.FAQ_SECTIONS = [
         a: "Whether the app folder is writable, the bundled app files are present, a site profile loads (and has no example values left), " +
           "the lab SSH/sudo passwords are saved, your Artifactory and Jenkins credentials are set (optional), git/npm exist if you set " +
           "build-from-source repos (optional), and whether the lab router answers. A red banner appears at the top of every tab while " +
-          "something blocking is wrong. Click <b>Re-run check</b> after fixing things. If the app can't start at all, a message box explains why " +
-          "(details in <code>matrixdeploy.log</code> next to the exe).",
+          "something blocking is wrong. Click <b>Re-run check</b> after fixing things. If the app can't start at all, its console window explains why " +
+          "and stays open until you press Enter.",
       },
       {
         q: "How do I switch between labs?",
@@ -199,6 +200,23 @@ window.FAQ_SECTIONS = [
         q: "What do Uptime / Disk Space / Specs show?",
         a: "<b>Uptime</b> is how long the room has been up. <b>Disk Space</b> is free space, including <code>/tmp</code> where SWUs are " +
           "extracted. <b>Specs</b> covers OS/kernel version, CPU, memory and root filesystem usage.",
+      },
+      {
+        q: "Where do I find the router NAT port forwarding for a lab?",
+        a: "The <b>Router Ports</b> tab lists every room's forwarded SSH, SWU, API/Cert and NMS ports for the active site's router " +
+          "(external port = base + room number: SSH 200+n, SWU 300+n, API 10000+n, NMS 11000+n), and generates the matching Cisco " +
+          "<code>ip nat inside source static</code> commands. Switch <b>Site</b> in the sidebar to see Lab 1 vs Lab 2's router. " +
+          "Click <b>Copy NAT Commands</b> to paste them in yourself, or use <b>Apply to Router</b> below to have Matrix Deploy do it.",
+      },
+      {
+        q: "How does \"Apply to Router\" actually change the router?",
+        a: "It opens a real SSH session to the router (needs a privileged admin account, not a read-only one), sends " +
+          "<code>enable</code> (with the enable password if the router asks for one), then <code>configure terminal</code>, each " +
+          "NAT line, <code>end</code> and <code>write memory</code> &mdash; the same steps you'd type by hand. Enter the router " +
+          "SSH username/password (and enable password if needed) in that card, tick the confirm box after reviewing the generated " +
+          "commands, then click <b>Apply to Router</b>. The console tab shows the router's live output. Save these once under " +
+          "<b>Settings &rarr; Edit saved credentials &rarr; Router admin</b> and they'll prefill next time (per-lab, like the " +
+          "SSH/sudo passwords). Because this writes live config to lab network infrastructure, double-check the commands first.",
       },
     ],
   },

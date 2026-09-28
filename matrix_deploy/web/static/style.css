@@ -427,6 +427,18 @@ button { font-family: inherit; cursor: pointer; border: none; }
   box-shadow: 0 20px 60px rgba(0, 0, 0, .35);
 }
 .card.fullscreen .code-editor { flex: 1 1 auto; height: auto; min-height: 0; resize: none; }
+.code-editor.compact { height: 220px; min-height: 140px; }
+
+/* ---------- Data tables (Router Ports) ---------- */
+.table-wrap { overflow-x: auto; }
+.data-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.data-table th, .data-table td {
+  text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.data-table th { color: var(--text-faint); font-weight: 600; }
+.data-table td.mono { font-family: 'JetBrains Mono', 'Consolas', monospace; }
+.data-table tbody tr:hover { background: var(--card-2); }
 
 /* ---------- Downloads ---------- */
 .downloads { margin-top: 14px; }

@@ -38,7 +38,7 @@ from ..env_settings import (
 )
 from ..preflight import run_preflight, summarize
 from ..jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
-from ..ssh_client import SSHError, SSHTarget, connect
+from ..ssh_client import SSHError, SSHTarget, connect, run_cisco_config_commands
 from .. import webapp_builder
 from .tunnel import (
     TunnelManager,
@@ -289,6 +289,46 @@ class JobManager:
             job.emit({"type": "room_status", "room": room.number, "status": "success" if ok else "failed"})
             job.emit({"type": "room_done", "room": room.number, "ok": ok})
             job.finish()
+
+        job.thread = threading.Thread(target=run, daemon=True)
+        job.thread.start()
+        return job
+
+    # -- Router NAT (Cisco config, not an OR room) ---------------------
+
+    def start_router_apply(
+        self,
+        router_ip: str,
+        admin_username: str,
+        admin_password: str,
+        enable_password: Optional[str],
+        commands: List[str],
+    ) -> Job:
+        job = self._register([])
+
+        def run() -> None:
+            job.emit({"type": "log", "message": f"Connecting to router {router_ip}:22 as {admin_username}...", "level": "info"})
+            try:
+                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password))
+            except SSHError as exc:
+                job.emit({"type": "log", "message": f"SSH connection failed: {exc}", "level": "error"})
+                job.finish()
+                return
+            try:
+                run_cisco_config_commands(
+                    client,
+                    commands,
+                    enable_password=enable_password,
+                    log=lambda m, lvl: job.emit({"type": "log", "message": m, "level": lvl}),
+                )
+                job.emit({"type": "log", "message": "Router NAT config applied and saved (write memory).", "level": "success"})
+            except SSHError as exc:
+                job.emit({"type": "log", "message": f"Failed to apply router config: {exc}", "level": "error"})
+            except Exception as exc:  # noqa: BLE001
+                job.emit({"type": "log", "message": f"Unexpected error applying router config: {exc}", "level": "error"})
+            finally:
+                client.close()
+                job.finish()
 
         job.thread = threading.Thread(target=run, daemon=True)
         job.thread.start()
@@ -706,6 +746,15 @@ class SaveCredentialsRequest(BaseModel):
     artifactory_token: Optional[str] = None
     jenkins_username: Optional[str] = None
     jenkins_token: Optional[str] = None
+    router_admin_username: Optional[str] = None
+    router_admin_password: Optional[str] = None
+    router_enable_password: Optional[str] = None
+
+
+class RouterApplyNatRequest(BaseModel):
+    router_admin_username: str
+    router_admin_password: str
+    router_enable_password: Optional[str] = None
 
 
 class SavePathsRequest(BaseModel):
@@ -803,6 +852,70 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             "same_physical_host": conn.same_physical_host,
         }
 
+    def _router_nat_plan(config: AppConfig):
+        """Return ``(rooms, commands)``: the per-room port table and the flat
+        list of ``ip nat inside source static`` lines for the active router."""
+        conn = config.connection
+        iface = conn.router_wan_interface
+        rooms = []
+        commands = []
+        for r in config.rooms:
+            ssh_p = r.ssh_port(conn.ssh_port_base)
+            swu_p = r.swu_external_port(conn.swu_port_base)
+            api_p = r.api_external_port()
+            nms_p = r.nms_external_port(conn.nms_port_base)
+            rooms.append({
+                "number": r.number,
+                "name": r.name,
+                "room_id": r.room_id,
+                "ssh_port": ssh_p,
+                "swu_port": swu_p,
+                "api_port": api_p,
+                "nms_port": nms_p,
+            })
+            commands.extend([
+                f"ip nat inside source static tcp {r.room_id} 22 interface {iface} {ssh_p}",
+                f"ip nat inside source static tcp {r.room_id} {conn.swu_service_port} interface {iface} {swu_p}",
+                f"ip nat inside source static tcp {r.room_id} 443 interface {iface} {api_p}",
+                f"ip nat inside source static tcp {r.room_id} 8443 interface {iface} {nms_p}",
+            ])
+        return rooms, commands
+
+    @app.get("/api/router-ports")
+    def router_ports() -> Dict[str, Any]:
+        """Per-room NAT port-forwarding plan for the active site's router,
+        plus ready-to-paste Cisco config (see ROUTER_PORT_FORWARDING_PATTERN.md)."""
+        conn = app_config.connection
+        rooms, commands = _router_nat_plan(app_config)
+        nat_script = "configure terminal\n" + "\n".join(commands) + "\nend\nwrite memory\n"
+        return {
+            "site_name": app_config.site_name,
+            "router_ip": conn.router_ip,
+            "wan_interface": conn.router_wan_interface,
+            "ssh_port_base": conn.ssh_port_base,
+            "swu_port_base": conn.swu_port_base,
+            "api_port_base": 10000,
+            "nms_port_base": conn.nms_port_base,
+            "rooms": rooms,
+            "nat_script": nat_script,
+        }
+
+    @app.post("/api/router/apply-nat")
+    def apply_router_nat(req: RouterApplyNatRequest) -> Dict[str, Any]:
+        """Actually SSH into the active site's router and apply the NAT plan:
+        enable -> configure terminal -> the ip nat lines -> end -> write
+        memory. Runs as a background job so the console streams the live
+        transcript (see JobManager.start_router_apply)."""
+        _, commands = _router_nat_plan(app_config)
+        job = jobs.start_router_apply(
+            app_config.connection.router_ip,
+            req.router_admin_username,
+            req.router_admin_password,
+            req.router_enable_password,
+            commands,
+        )
+        return {"job_id": job.id}
+
     @app.get("/api/profiles")
     def list_site_profiles() -> Dict[str, Any]:
         profiles = list_profiles()
@@ -881,6 +994,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "username": env.get("username", ""),
                 "artifactory_email": env.get("artifactory_email", ""),
                 "jenkins_username": env.get("jenkins_username", ""),
+                "router_admin_username": env.get("router_admin_username", ""),
                 **{f: env.get(f, "") for f in PATH_FIELDS},
             },
             "secrets": {
@@ -888,6 +1002,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "sudo_password": secrets.get("sudo_password", ""),
                 "artifactory_token": secrets.get("artifactory_token", ""),
                 "jenkins_token": secrets.get("jenkins_token", ""),
+                "router_admin_password": secrets.get("router_admin_password", ""),
+                "router_enable_password": secrets.get("router_enable_password", ""),
             },
             "env_path": str(env_path),
             "lab_env_path": str(_lab_env_path()),
@@ -905,7 +1021,13 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         to the shared root .env. Blank fields leave saved values alone."""
         lab_path, shared_path = _lab_env_path(), default_env_path()
         try:
-            save_env_values(lab_path, {"ssh_password": req.ssh_password, "sudo_password": req.sudo_password})
+            save_env_values(lab_path, {
+                "ssh_password": req.ssh_password,
+                "sudo_password": req.sudo_password,
+                "router_admin_username": req.router_admin_username,
+                "router_admin_password": req.router_admin_password,
+                "router_enable_password": req.router_enable_password,
+            })
             save_env_values(shared_path, {
                 "artifactory_email": req.artifactory_email,
                 "artifactory_token": req.artifactory_token,
