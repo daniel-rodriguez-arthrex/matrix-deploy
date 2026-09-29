@@ -901,6 +901,7 @@ const ACTION_TITLES = {
   get_logs: "Service Logs", get_full_journal: "System Logs",
   export_bundle: "Support Bundle", add_trusted_endpoint: "Trusted Endpoint",
   enable_matrix_app_debug: "Enable DevTools", disable_matrix_app_debug: "Disable DevTools",
+  wake_display: "Wake Display",
   reset_web_app: "Web App Reset", diag_web_app: "Web App Diagnostics",
 };
 function actionTitle(action) {
@@ -1309,6 +1310,15 @@ el("disable-matrix-app").addEventListener("click", () => {
     action: "disable_matrix_app_debug",
     sequential: true,
   }, { needRooms: false, title: `Disable DevTools OR ${n}` });
+});
+el("wake-display").addEventListener("click", () => {
+  const n = Number(el("tunnel-room").value);
+  startJob("/api/jobs/system-action", {
+    room_numbers: [n],
+    ...credentials(),
+    action: "wake_display",
+    sequential: true,
+  }, { needRooms: false, title: `Wake Display OR ${n}` });
 });
 
 el("open-matrix-app").addEventListener("click", async () => {

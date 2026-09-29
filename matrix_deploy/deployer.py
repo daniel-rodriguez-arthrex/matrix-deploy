@@ -786,6 +786,13 @@ class Deployer:
             f"launcher={shlex.quote(launcher)}",
             'if ! test -f "$launcher"; then echo "Launcher not found: $launcher" >&2; exit 2; fi',
             "if ! grep -Fq -- '--ozone-platform=wayland' \"$launcher\"; then echo \"Launcher has no supported Matrix App invocation.\" >&2; exit 3; fi",
+        ] + Deployer._sway_session_script()
+
+    @staticmethod
+    def _sway_session_script() -> List[str]:
+        """Shell lines that discover the active Wayland/sway session env
+        (``$app_user``, ``$runtime_dir``, ``$sway_socket``, ...)."""
+        return [
             'gui_session=$(loginctl list-sessions --no-legend 2>/dev/null | awk "{print \\$1}" | while read -r session; do',
             '  [ "$(loginctl show-session "$session" -p Active --value 2>/dev/null)" = yes ] || continue',
             '  [ "$(loginctl show-session "$session" -p Type --value 2>/dev/null)" = wayland ] || continue',
@@ -973,6 +980,40 @@ class Deployer:
                 time.sleep(1)
             self.log(f"DevTools is still answering on port {port} - the old app may not have exited.", "error")
             return False
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def wake_display(self, room: Room) -> bool:
+        """Wake a sleeping room display by powering the sway outputs back on
+        in the active kiosk session (``output * power on``, falling back to
+        ``dpms on`` on older sway). Requires the sudo password."""
+        self.log(f"=== OR {room.number}: Waking display ===", "info")
+        if not self.creds.sudo_password:
+            self.log("A sudo password is required to wake the display.", "error")
+            return False
+
+        script = "\n".join(self._sway_session_script() + [
+            'sway_cmd() { runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" swaymsg -s "$sway_socket" "$@" 2>&1; }',
+            "if ! sway_cmd 'output * power on'; then sway_cmd 'output * dpms on' || exit 6; fi",
+            'echo "Display outputs powered on."',
+        ])
+
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(1)
+            if not self._run_sudo_script(client, script):
+                self.log("Failed to wake the display.", "error")
+                return False
+            self._advance()
+            self.log(f"OR {room.number}: display woken.", "success")
+            return True
         finally:
             try:
                 client.close()

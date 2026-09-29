@@ -84,6 +84,7 @@ SIMPLE_ACTIONS = {
     "add_trusted_endpoint",
     "enable_matrix_app_debug",
     "disable_matrix_app_debug",
+    "wake_display",
     "reset_web_app",
     "diag_web_app",
 }
@@ -635,6 +636,8 @@ def _dispatch_action(deployer: Deployer, room: Room, action: str, params: Dict[s
         return deployer.enable_matrix_app_debugging(room)
     if action == "disable_matrix_app_debug":
         return deployer.disable_matrix_app_debugging(room)
+    if action == "wake_display":
+        return deployer.wake_display(room)
     if action == "reset_web_app":
         return deployer.reset_web_app(room)
     if action == "diag_web_app":

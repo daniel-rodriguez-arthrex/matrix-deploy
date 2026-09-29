@@ -194,6 +194,7 @@ window.FAQ_SECTIONS = [
         q: "How do I see or debug the Matrix App on a room's screen?",
         a: "In <b>Tunnels</b>, pick the room and click <b>Enable Remote Debugging</b> (relaunches the kiosk app with DevTools and needs sudo). " +
           "Then <b>View Matrix App (DevTools)</b> opens the inspector in a Chromium browser, and <b>Screenshot</b> saves a PNG of the screen. " +
+          "If the room's screen has gone to sleep, click <b>Wake Display</b> (needs sudo) to power it back on first. " +
           "Click <b>Disable Remote Debugging</b> when you're done. Open tunnels are listed under <b>Active Tunnels</b> and close when the app stops.",
       },
       {
