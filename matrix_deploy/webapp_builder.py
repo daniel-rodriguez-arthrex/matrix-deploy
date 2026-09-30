@@ -275,6 +275,47 @@ def build_repo(repo_dir: Path, log: Logger, is_cancelled: Optional[Callable[[], 
     return True
 
 
+def resolve_web_assets(web_assets: Path) -> Path:
+    """Return the folder that actually holds the web app's ``index.html``.
+
+    Accepts the Angular output folder itself or its parent (e.g. the repo's
+    ``dist``, which only contains ``arthrex-synergy-matrix/``). Deploying the
+    parent would nest the app one level too deep on the room and make
+    ``/app/`` return "Not Found"."""
+    web_assets = Path(web_assets)
+    if (web_assets / "index.html").is_file():
+        return web_assets
+    for candidate in (web_assets / DEFAULT_WEB_DIST_SUBPATH.name, *sorted(p for p in web_assets.glob("*") if p.is_dir())):
+        if (candidate / "index.html").is_file():
+            return candidate
+    return web_assets
+
+
+def folder_problem(field: str, folder: Path) -> Optional[str]:
+    """Sanity-check the contents of a web app folder setting (``backend_repo``,
+    ``web_repo``, ``webapp_dist``, ``webapp_web``). Returns a plain-English
+    problem with a suggested fix, or ``None`` if it looks right (or the
+    folder doesn't exist - that's reported separately)."""
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        return None
+    if field in ("backend_repo", "web_repo"):
+        if not (folder / "package.json").is_file():
+            return f"{folder} has no package.json - point it at the repo's top folder."
+    elif field == "webapp_web":
+        if not (folder / "index.html").is_file():
+            better = resolve_web_assets(folder)
+            if better != folder:
+                return f"{folder} has no index.html - use {better} instead."
+            return f"{folder} has no index.html - build the web app, or point it at the built '{DEFAULT_WEB_DIST_SUBPATH.name}' folder."
+    elif field == "webapp_dist":
+        if not (folder / "server.js").is_file():
+            if (folder / "dist" / "server.js").is_file():
+                return f"{folder} has no server.js - use {folder / 'dist'} instead."
+            return f"{folder} has no server.js - build the backend, or point it at matrix-api's 'dist' folder."
+    return None
+
+
 def _read_package_version(package_json: Path) -> Optional[str]:
     try:
         if not package_json.exists():

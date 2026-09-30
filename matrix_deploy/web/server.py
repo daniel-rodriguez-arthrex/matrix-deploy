@@ -412,6 +412,17 @@ class JobManager:
                     _log("Backend dist and web assets paths are required (build from source or set them directly).", "error")
                     return
 
+                resolved_web = webapp_builder.resolve_web_assets(local_web)
+                if resolved_web != local_web:
+                    _log(f"Web assets folder has no index.html; using {resolved_web} instead.", "warning")
+                    local_web = resolved_web
+                problems = [p for p in (webapp_builder.folder_problem("webapp_dist", local_dist),
+                                        webapp_builder.folder_problem("webapp_web", local_web)) if p]
+                if problems:
+                    for problem in problems:
+                        _log(problem, "error")
+                    return
+
                 webapp_builder.check_version_compatibility(local_dist, local_web, _log)
 
                 if req.build_only:
@@ -1058,6 +1069,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 warnings.append(f"Download folder is a file, not a folder: {value}")
             elif field not in ("swu_file", "swu_download_dir") and not p.is_dir():
                 warnings.append(f"Folder not found: {value}")
+            elif problem := webapp_builder.folder_problem(field, p):
+                warnings.append(problem)
         env_path = default_env_path()
         try:
             save_env_values(env_path, values, allow_clear=True)

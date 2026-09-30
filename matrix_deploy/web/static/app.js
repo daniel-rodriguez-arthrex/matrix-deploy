@@ -983,11 +983,11 @@ const WEBAPP_MODES = {
     hint: "Uploads an existing build (the two folders below) to each selected room and restarts matrix-api.",
   },
   "build-deploy": {
-    go: "Build & Deploy", artifacts: "Built artifacts (optional - defaults to each repo's dist folder)",
+    go: "Build & Deploy", artifacts: "Built artifacts (optional - leave blank to use <backend repo>\\dist and <web repo>\\dist\\arthrex-synergy-matrix)",
     hint: "Runs git pull + npm install + npm run build in both repos, then deploys the result to each selected room.",
   },
   build: {
-    go: "Build", artifacts: "Built artifacts (optional - defaults to each repo's dist folder)",
+    go: "Build", artifacts: "Built artifacts (optional - leave blank to use <backend repo>\\dist and <web repo>\\dist\\arthrex-synergy-matrix)",
     hint: "Runs git pull + npm install + npm run build in both repos and checks their versions match. Nothing is deployed; no rooms needed.",
   },
 };

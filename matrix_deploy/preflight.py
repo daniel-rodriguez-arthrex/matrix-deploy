@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import GOLDEN_NMS_CONFIGS, NMS_USER_CONFIG_TEMPLATE, AppConfig, app_dir, config_dir, list_profiles
 from .env_settings import load_merged_env
+from .webapp_builder import folder_problem
 
 STATIC_DIR = Path(__file__).resolve().parent / "web" / "static"
 
@@ -185,9 +186,11 @@ def run_preflight(
     if dl and Path(dl).expanduser().exists() and not Path(dl).expanduser().is_dir():
         missing.append(f"SWU download folder ({dl}) is a file")
     saved = [f for f in (*labels, "swu_download_dir") if env.get(f)]
+    missing += [p for f in ("backend_repo", "web_repo", "webapp_dist", "webapp_web")
+                if env.get(f) and (p := folder_problem(f, Path(env[f])))]
     if missing:
         add("folders", "Local folders", "warn",
-            "Saved but not found on this computer: " + "; ".join(missing),
+            "Saved folder problems: " + "; ".join(missing),
             "Click 'Set my folders' and point them at folders on this computer (or clear them).", "folders")
     elif saved:
         add("folders", "Local folders", "ok", f"{len(saved)} saved folder(s) found.")

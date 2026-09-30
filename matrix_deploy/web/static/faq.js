@@ -121,7 +121,8 @@ window.FAQ_SECTIONS = [
       {
         q: "Which Web App mode should I use?",
         a: "<ul>" +
-          "<li><b>Deploy existing build</b>: point <b>Backend dist folder</b> and <b>Web assets folder</b> at build output you already have.</li>" +
+          "<li><b>Deploy existing build</b>: point <b>Backend dist folder</b> at matrix-api's <code>dist</code> (the one with <code>server.js</code>) " +
+          "and <b>Web assets folder</b> at the web app's <code>dist\\arthrex-synergy-matrix</code> (the one with <code>index.html</code>), not its parent <code>dist</code>.</li>" +
           "<li><b>Build + deploy</b>: runs <code>git pull</code>, <code>npm install</code> and <code>npm run build</code> in your local " +
           "<code>matrix-api-linux</code> / <code>matrix-app-linux</code> checkouts, then deploys. Needs Git and Node.js on this computer.</li>" +
           "<li><b>Build only</b>: the build step without touching any room.</li>" +
