@@ -3,16 +3,19 @@
 Reads non-secret fields and, if present, secrets (SSH/sudo passwords,
 Artifactory/Jenkins tokens) from the shared root ``.env`` and each site
 profile's sibling ``<lab>.env``. The web UI's credentials dialog writes back
-here via ``save_env_values``. Storing secrets here is a convenience tradeoff
-(plaintext on disk, gitignored) - leave them blank to type them into the UI
-each session instead.
+here via ``save_env_values``. Secret values are stored encrypted for the
+current Windows user (``secret_store``, DPAPI); plaintext ones (hand-edited,
+or shipped lab passwords) are encrypted by ``protect_env_file`` at startup.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 import sys
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, Optional, Tuple
+
+from . import secret_store
 
 
 # Recognized non-secret keys and the settings field they map to.
@@ -28,6 +31,9 @@ NON_SECRET_KEY_MAP = {
     "WEBAPP_DIST": "webapp_dist",
     "WEBAPP_WEB": "webapp_web",
     "ROUTER_ADMIN_USERNAME": "router_admin_username",
+    "MATRIX_SWITCH_USERNAME": "switch_username",
+    # Per-machine: "qa" or "integration" (integration hides QA-only tabs).
+    "MATRIX_TEAM": "team",
 }
 
 # Per-machine folder settings (Settings > Local folders). Saved to the root
@@ -47,10 +53,30 @@ SECRET_KEY_MAP = {
     "ARTIFACTORY_API_KEY": "artifactory_token",
     "JENKINS_TOKEN": "jenkins_token",
     "ROUTER_ADMIN_PASSWORD": "router_admin_password",
+    "MATRIX_ROUTER_0_PASSWORD": "router_admin_password",
     "ROUTER_ENABLE_PASSWORD": "router_enable_password",
+    # Site credentials from the facility planner (facility.py import).
+    "MATRIX_WINDOWS_PASSWORD": "windows_password",
+    "MATRIX_SWITCH_PASSWORD": "switch_password",
+    "MATRIX_SWITCH_0_PASSWORD": "switch_password",
+    "MATRIX_NMS_PASSWORD": "nms_password",
+    "MATRIX_EXTRON_PASSWORD": "extron_password",
+    "MATRIX_SITE_API_KEY": "site_api_key",
+    "MATRIX_IC_KEY": "ic_key",
 }
 
-ENV_KEY_MAP = {**NON_SECRET_KEY_MAP, **SECRET_KEY_MAP}
+# Written by the app itself, never sent to the browser (qa_lock.py).
+INTERNAL_KEY_MAP = {"MATRIX_QA_TOKEN": "qa_token"}
+
+ENV_KEY_MAP = {**NON_SECRET_KEY_MAP, **SECRET_KEY_MAP, **INTERNAL_KEY_MAP}
+
+# Keys stored encrypted: the known secret keys plus per-device ones like
+# MATRIX_SWITCH_3_PASSWORD from planner imports / Matrix Lab env files.
+_SECRET_NAME_RE = re.compile(r"(PASSWORD|TOKEN|SECRET|_KEY)$")
+
+
+def is_secret_key(key: str) -> bool:
+    return key in SECRET_KEY_MAP or key in INTERNAL_KEY_MAP or bool(_SECRET_NAME_RE.search(key))
 
 
 def default_env_path() -> Path:
@@ -86,7 +112,8 @@ def parse_env_file(path: Path) -> Dict[str, str]:
 
     Supports comments (``#``), blank lines, optional ``export`` prefix, and
     single/double quoted values. Returns an empty dict if the file is missing
-    or unreadable.
+    or unreadable. Encrypted values are decrypted; ones this Windows user
+    can't decrypt are left out (as if not saved).
     """
     result: Dict[str, str] = {}
     try:
@@ -105,8 +132,8 @@ def parse_env_file(path: Path) -> Dict[str, str]:
             continue
         key, _, value = line.partition("=")
         key = key.strip()
-        value = _strip_quotes(value.strip())
-        if key:
+        value = secret_store.unprotect(_strip_quotes(value.strip()))
+        if key and value is not None:
             result[key] = value
     return result
 
@@ -140,6 +167,10 @@ def save_env_values(path: Path, values: Dict[str, Optional[str]], allow_clear: b
     pending = {f: v for f, v in values.items() if v or (allow_clear and v is not None)}
     if not pending:
         return
+    # A line break in a value would add (or override) other keys in the file.
+    bad = [f for f, v in pending.items() if any(c in v for c in "\r\n\x00")]
+    if bad:
+        raise ValueError(f"Line breaks aren't allowed in: {', '.join(bad)}")
     path = Path(path)
     try:
         lines = path.read_text(encoding="utf-8-sig").splitlines()
@@ -154,14 +185,49 @@ def save_env_values(path: Path, values: Dict[str, Optional[str]], allow_clear: b
         key = key.partition("=")[0].strip()
         field_name = ENV_KEY_MAP.get(key)
         if field_name in pending:
-            lines[i] = f"{key}={_format_env_value(pending[field_name])}"
+            lines[i] = _env_line(key, pending[field_name])
             written.add(field_name)
     canonical = {field_name: key for key, field_name in reversed(list(ENV_KEY_MAP.items()))}
     for field_name, value in pending.items():
         if field_name not in written and value:
-            lines.append(f"{canonical[field_name]}={_format_env_value(value)}")
+            lines.append(_env_line(canonical[field_name], value))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _env_line(key: str, value: str) -> str:
+    if value and is_secret_key(key):
+        value = secret_store.protect(value)
+    return f"{key}={_format_env_value(value)}"
+
+
+def protect_env_file(path: Path) -> int:
+    """Encrypt any plaintext secret values in ``path`` in place (comments and
+    other lines untouched). Returns how many were encrypted."""
+    if not secret_store.AVAILABLE:
+        return 0
+    path = Path(path)
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return 0
+    changed = 0
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = (line[len("export "):] if line.startswith("export ") else line).partition("=")
+        key, value = key.strip(), _strip_quotes(value.strip())
+        if value and is_secret_key(key) and not secret_store.is_protected(value):
+            lines[i] = _env_line(key, value)
+            changed += 1
+    if changed:
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return changed
+
+
+def protect_env_files(paths: Iterable[Path]) -> int:
+    return sum(protect_env_file(p) for p in paths)
 
 
 def load_env_settings(path: Path | None = None) -> Dict[str, str]:

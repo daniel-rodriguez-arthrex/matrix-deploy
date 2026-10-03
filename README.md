@@ -1,8 +1,13 @@
-# Matrix Deploy
+# Matrix Facility Manager
 
-A localhost web tool for deploying SWU firmware updates to Matrix operating
-rooms over SSH/SCP, running system/service actions, deploying the Matrix web
-app, and editing each room's live `matrix.api.config.json` directly.
+A localhost web tool for running the Matrix lab operating rooms: checking room
+health (Facility tab), running system/service actions, collecting logs, opening
+DevTools tunnels, deploying SWU software updates and the Matrix web app over
+SSH/SCP, editing each room's live `matrix.api.config.json`, and planning router
+NAT ports.
+
+The repo, Python package (`matrix_deploy`) and exe (`MatrixDeploy.exe`) keep
+their original names on purpose, so existing IT allowlisting still applies.
 
 The PyQt5 desktop app was retired in favor of the web UI. It is preserved at
 the git tag `v2-last-pyqt`.
@@ -106,7 +111,7 @@ When frozen, `config\` and `.env` are always read from the folder that holds
 
 1. Pick the lab in the **Site** dropdown and check **Settings > Setup Check**.
 2. Tick the target rooms in the sidebar.
-3. On **Deploy**, click **Download Latest SWU** or **Browse** to an SWU file.
+3. On **Software Update**, click **Download Latest SWU** or **Browse** to an SWU file.
 4. Choose a concurrency and click **Start Deployment**.
 5. Use **Config** to edit a room's live config. **Actions**, **Logs**,
    **Web App** and **Tunnels** cover everything else. The **FAQ** tab explains

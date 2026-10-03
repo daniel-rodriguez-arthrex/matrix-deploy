@@ -1,7 +1,16 @@
-paramiko>=3.3.1
-scp>=0.14.5
-requests>=2.31.0
-fastapi>=0.111.0
-uvicorn>=0.30.0
-pydantic>=2.7.0
-websockets>=12.0
+# Exact pins: build_exe.ps1 installs these into the shipped exe, so a floating
+# range would pull whatever was published minutes ago. Bump deliberately
+# (check https://osv.dev or `pip-audit -r requirements.txt` first).
+paramiko==4.0.0  # <5 on purpose: 5.0 dropped ssh-rsa host keys; the lab EXOS switches only offer ssh-rsa (accepted: GHSA-r374-rxx8-8654, SHA-1 ssh-rsa)
+scp==0.16.1
+requests==2.34.2
+fastapi==0.141.1
+uvicorn==0.53.0
+pydantic==2.13.5
+websockets==17.1
+# Transitive, pinned at releases with the known advisories fixed.
+urllib3==2.8.0
+cryptography==50.0.1
+idna==3.19
+pynacl==1.6.2
+anyio==4.15.1

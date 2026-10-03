@@ -1,4 +1,4 @@
-# Matrix Deploy - build the distributable folder app (PyInstaller)
+# Matrix Facility Manager - build the distributable folder app (PyInstaller)
 #
 # Builds the localhost web UI (run_server.py) into dist\MatrixDeploy\ and zips
 # it to dist\MatrixDeploy.zip, ready to hand to coworkers. The folder contains:
@@ -47,8 +47,25 @@ function Invoke-Native([string]$what, [scriptblock]$cmd) {
   if ($code -ne 0) { throw "$what failed (exit $code)" }
 }
 
+# QA lock (hash only, never the password), baked into _internal so deleting
+# a file from the app's config folder can't unlock the QA tabs. See
+# matrix_deploy\qa_lock.py. Required: every shared build has the QA tabs
+# locked, so nobody can hand out an unlocked copy by accident.
+$qaLockFile = "config\qa_lock.cfg"
+$qaLock = $null
+if (Test-Path $qaLockFile) {
+  try { $qaLock = Get-Content $qaLockFile -Raw | ConvertFrom-Json } catch { $qaLock = $null }
+}
+if (-not $qaLock -or -not $qaLock.salt -or -not $qaLock.verify) {
+  throw ("No valid QA lock in $qaLockFile, so this build would leave the QA-only tabs open to everyone. " +
+    "Set the QA password first: run 'python run_server.py', open Settings > Your team > QA password, then re-run this build.")
+}
+$qaLockArgs = @("--add-data", "$PSScriptRoot\$qaLockFile;matrix_deploy")
+Write-Host "QA lock: built in ($qaLockFile)"
+
 Write-Host "Installing build dependencies..."
-Invoke-Native "pip install" { python -m pip install --disable-pip-version-check --upgrade pyinstaller -r requirements.txt }
+# Pinned: an unpinned --upgrade pulls whatever was published minutes ago into the shipped exe.
+Invoke-Native "pip install" { python -m pip install --disable-pip-version-check "pyinstaller==6.22.3" -r requirements.txt }
 
 Write-Host "Building folder app..."
 # Plain --console build. SentinelOne deleted a --windowed build on sight, and
@@ -63,9 +80,24 @@ Invoke-Native "PyInstaller" { python -m PyInstaller --noconfirm --clean --consol
   --collect-submodules uvicorn `
   --collect-submodules websockets `
   --exclude-module PyQt5 `
+  @qaLockArgs `
   run_server.py }
 
 # --- Site profiles + scrubbed lab credential files --------------------------
+# Saved passwords are DPAPI-encrypted for *your* Windows account
+# (matrix_deploy\secret_store.py), which no coworker can decrypt. Shipped lab
+# SSH/sudo passwords are decrypted here; each copy re-encrypts them for its
+# own user on first launch.
+Add-Type -AssemblyName System.Security
+$dpapiEntropy = [Text.Encoding]::UTF8.GetBytes("matrix-facility-manager")
+function Unprotect-EnvLine([string]$line) {
+  if ($line -notmatch '^(\s*(?:export\s+)?[^=]+=)\s*["'']?dpapi:([A-Za-z0-9+/=]+)["'']?\s*$') { return $line }
+  $keyPart = $Matches[1]
+  $bytes = [Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($Matches[2]), $dpapiEntropy, 'CurrentUser')
+  $value = [Text.Encoding]::UTF8.GetString($bytes)
+  if ($value -ne $value.Trim() -or $value -match '^(["'']).*\1$') { $value = if ($value.Contains('"')) { "'$value'" } else { "`"$value`"" } }
+  return $keyPart + $value
+}
 $cfgOut = Join-Path $distDir "config"
 New-Item -ItemType Directory -Force $cfgOut | Out-Null
 $profiles = Get-ChildItem "config\*.json" | Where-Object { $_.Name -ne "deploy_config.example.json" }
@@ -75,7 +107,7 @@ foreach ($p in $profiles) {
   $labEnv = [IO.Path]::ChangeExtension($p.FullName, ".env")
   if (Test-Path $labEnv) {
     $kept = @("# Lab SSH/sudo passwords for $($p.BaseName) (shared lab credentials).") +
-      @(Get-Content $labEnv | Where-Object { $_ -match $labKeysAllowed })
+      @(Get-Content $labEnv | Where-Object { $_ -match $labKeysAllowed } | ForEach-Object { Unprotect-EnvLine $_ })
     Set-Content -Path (Join-Path $cfgOut (Split-Path $labEnv -Leaf)) -Value $kept -Encoding UTF8
     Write-Host "  profile $($p.Name) + $(Split-Path $labEnv -Leaf) (SSH/sudo keys only)"
   } else {
@@ -86,16 +118,16 @@ Copy-Item "config\deploy_config.example.json" $cfgOut
 Copy-Item ".env.example" (Join-Path $distDir ".env.example")
 
 @"
-MATRIX DEPLOY - QUICK START
-===========================
+MATRIX FACILITY MANAGER - QUICK START
+=====================================
 
 1. Extract this whole folder somewhere you own (e.g. Documents or Desktop).
    Don't run it from inside the .zip, and don't put it in Program Files.
 
 2. Double-click MatrixDeploy.exe.
    A small console window opens (leave it alone, you can minimize it), and
-   Matrix Deploy opens in its own window (it uses Chrome or Edge behind the
-   scenes). Close the Matrix Deploy window to quit; the console closes by
+   Matrix Facility Manager opens in its own window (it uses Chrome or Edge
+   behind the scenes). Close the Matrix Facility Manager window to quit; the console closes by
    itself. If a deploy or other job is still running, it finishes first.
    Double-clicking again while it's open just brings up another window.
 
@@ -113,9 +145,14 @@ MATRIX DEPLOY - QUICK START
 5. Optional: set your own SWU download folder (and repo/dist folders if
    you use the Web App tab) under Settings > Local folders > Save folders.
 
-Your passwords and tokens are saved as plain text in this folder, only on
-this computer (config\<lab>.env and .env). Don't share the folder after you've
-entered your own tokens.
+This zip contains the shared lab SSH/sudo passwords in plain text
+(config\<lab>.env). Only share it with people who should have that access,
+and delete the .zip once you've extracted it. On first launch the app
+encrypts them for your Windows account.
+
+Passwords and tokens you enter are saved encrypted (Windows DPAPI) in this
+folder, readable only by your Windows account on this computer. Still don't
+share the folder after you've entered your own tokens.
 
 Troubleshooting
   - "Lab network" warning: connect to the lab network/VPN.
@@ -132,6 +169,9 @@ $leaks = Get-ChildItem $distDir -Recurse -File -Force |
   Select-String -Pattern '^\s*(export\s+)?(ARTIFACTORY_TOKEN|ARTIFACTORY_API_KEY|JENKINS_TOKEN)\s*=\s*\S'
 if ($leaks) { throw "Refusing to package: personal token found in $($leaks[0].Path)" }
 if (Test-Path (Join-Path $distDir ".env")) { throw "Refusing to package: a root .env ended up in the dist folder." }
+if (-not (Test-Path (Join-Path $distDir "_internal\matrix_deploy\qa_lock.cfg"))) {
+  throw "Refusing to package: the QA lock didn't make it into _internal\matrix_deploy\qa_lock.cfg."
+}
 
 Start-Sleep -Seconds 5
 if (-not (Test-Path (Join-Path $distDir "MatrixDeploy.exe"))) {

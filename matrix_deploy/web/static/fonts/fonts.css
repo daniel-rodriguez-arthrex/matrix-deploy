@@ -1,0 +1,16 @@
+/* Bundled (Latin subset, variable weight) so the app makes no requests to
+   Google Fonts and looks the same offline. SIL Open Font License: see OFL-*.txt. */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url(Inter-latin.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url(JetBrainsMono-latin.woff2) format('woff2');
+}

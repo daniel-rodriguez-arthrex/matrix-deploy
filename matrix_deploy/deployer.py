@@ -12,25 +12,30 @@ import re
 import shlex
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 import paramiko
 
+from . import tls_pins
 from .config import AppConfig, Room, golden_nms_config_path, render_nms_user_config
 from .ssh_client import (
     SSHError,
     SSHTarget,
     connect,
     download_file,
+    exec_command,
+    forget_host_key,
     get_disk_free_kb,
     run_command,
+    sudo_prefix,
     upload_dir,
     upload_file,
+    upload_text,
     wait_for_reboot,
 )
 
@@ -112,6 +117,7 @@ class Deployer:
             port=room.ssh_port(conn.ssh_port_base),
             username=conn.ssh_username,
             password=self.creds.ssh_password,
+            sudo_password=self.creds.sudo_password,
         )
 
     def _remote_swu_name(self, room: Room, swu_file: Path) -> str:
@@ -183,7 +189,8 @@ class Deployer:
 
         if output:
             # Log raw output for debugging; may be multi-line.
-            self.log(f"act-mfg-eeprom display output:\n{output}", "detail")
+            redacted = re.sub(r"(?im)^(\s*\S*(?:password|passwd|secret|key|token)\S*\s*[:=]\s*)\S.*$", r"\1<hidden>", output)
+            self.log(f"act-mfg-eeprom display output:\n{redacted}", "detail")
 
         password = self._parse_eeprom_password(output)
         if password:
@@ -492,16 +499,41 @@ class Deployer:
         """Copy the staged config to the remote path and restart the service."""
         conn = self.config.connection
         sudo = self._sudo_prefix()
-        remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
+        remote_staging = self._config_staging_path(room)
         cmd = (
             f"{sudo} cp {shlex.quote(remote_staging)} {shlex.quote(conn.remote_config_path)} "
             f"&& {sudo} systemctl restart {shlex.quote(conn.service_name)} "
             f"&& {sudo} systemctl --no-pager --full status {shlex.quote(conn.service_name)} -n 10"
         )
-        exit_status = run_command(
-            client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
-        )
+        try:
+            exit_status = run_command(
+                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+            )
+        finally:
+            self._remove_staging(client, remote_staging)
         return exit_status == 0
+
+    def _config_staging_path(self, room: Room) -> str:
+        return f"/home/{self.config.connection.ssh_username}/or{room.number}.json"
+
+    @staticmethod
+    def _remove_staging(client: paramiko.SSHClient, remote_path: str) -> None:
+        """Don't leave staged copies (API keys, passwords) in the home folder."""
+        try:
+            run_command(client, f"rm -f {shlex.quote(remote_path)}")
+        except Exception:  # noqa: BLE001 - best effort
+            pass
+
+    def _stage_matrix_config(self, client: paramiko.SSHClient, room: Room, text: str) -> bool:
+        """Upload config text (from memory, mode 0600) to the room's staging path."""
+        self.log("Uploading config...", "detail")
+        try:
+            upload_text(client, text, self._config_staging_path(room))
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"Config upload failed: {exc}", "error")
+            self._remove_staging(client, self._config_staging_path(room))
+            return False
 
     def _restart_service(
         self, client: paramiko.SSHClient, room: Room, service_name: str
@@ -691,7 +723,7 @@ class Deployer:
             timestamp = time.strftime("%Y%m%d-%H%M%S")
             dest = dest_dir / f"or{room.number}-logs-{timestamp}.txt"
             banner = (
-                f"Matrix Deploy log export\n"
+                f"Matrix Facility Manager log export\n"
                 f"Room: OR {room.number} ({room.name})\n"
                 f"Host: {conn.router_ip}:{room.ssh_port(conn.ssh_port_base)}\n"
                 f"Generated: {timestamp}\n"
@@ -757,7 +789,7 @@ class Deployer:
             self._advance()  # downloaded
 
             banner = (
-                f"Matrix Deploy full journal export\n"
+                f"Matrix Facility Manager full journal export\n"
                 f"Room: OR {room.number} ({room.name})\n"
                 f"Host: {conn.router_ip}:{room.ssh_port(conn.ssh_port_base)}\n"
                 f"Generated: {timestamp}\n"
@@ -816,9 +848,12 @@ class Deployer:
         ]
 
     @staticmethod
-    def _matrix_app_relaunch_script(port: int) -> List[str]:
+    def _matrix_app_relaunch_script(port: int, kiosk_ws: str) -> List[str]:
         """Shell lines that stop the running Matrix App and relaunch it via
-        the launcher inside the discovered sway session."""
+        the launcher inside the discovered sway session, on the kiosk
+        workspace (sway opens an exec'd window on the focused workspace, so
+        relaunching while the admin app is showing would put the kiosk
+        window on top of the admin app)."""
         return [
             "app_pids=$(ps -eo pid=,args= | awk '/[e]lectron.*matrix-app\\.asar/ && $0 !~ /--type=/ {print $1}')",
             '[ -n "$app_pids" ] && kill $app_pids 2>/dev/null || true',
@@ -829,6 +864,7 @@ class Deployer:
             f"port_holder=$(ss -ltnpH 'sport = :{port}' 2>/dev/null | grep -oE 'pid=[0-9]+' | head -n1 | cut -d= -f2)",
             '[ -n "$port_holder" ] && kill "$port_holder" 2>/dev/null || true',
             "sleep 1",
+            'runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" "DBUS_SESSION_BUS_ADDRESS=$dbus_address" swaymsg -s "$sway_socket" ' + shlex.quote(f"workspace {kiosk_ws}") + ' >/dev/null 2>&1 || true',
             'runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" "DBUS_SESSION_BUS_ADDRESS=$dbus_address" swaymsg -s "$sway_socket" exec "$launcher" 2>&1',
             'echo "Relaunch requested."',
         ]
@@ -883,7 +919,7 @@ class Deployer:
             f"  if ! grep -Fq -- {shlex.quote(marker)} \"$launcher\"; then mv -- \"$backup\" \"$launcher\"; echo 'Could not add flags; launcher restored.' >&2; exit 7; fi",
             '  echo "DevTools flags added. Backup: $backup"',
             "fi",
-        ] + self._matrix_app_relaunch_script(port))
+        ] + self._matrix_app_relaunch_script(port, conn.kiosk_workspace))
 
         try:
             client = connect(self._target(room))
@@ -902,6 +938,7 @@ class Deployer:
             # hang while it comes back).
             if _devtools_ready():
                 self.log(f"OR {room.number}: Matrix App DevTools already enabled on port {port}.", "success")
+                self.log("Next: click Open DevTools.", "info")
                 self._advance()
                 self._advance()
                 return True
@@ -917,6 +954,7 @@ class Deployer:
                     return False
                 if _devtools_ready():
                     self.log(f"OR {room.number}: Matrix App DevTools ready on port {port}.", "success")
+                    self.log("Next: click Open DevTools.", "info")
                     self._advance()
                     return True
                 if attempt and attempt % 3 == 0:
@@ -924,7 +962,7 @@ class Deployer:
                 time.sleep(1)
             self.log(
                 f"Relaunched, but DevTools did not become ready on port {port}. "
-                "The kiosk may still be starting - wait a moment and try View Matrix App.",
+                "The kiosk may still be starting - wait a moment and click Open DevTools.",
                 "error",
             )
             return False
@@ -957,7 +995,7 @@ class Deployer:
             f"elif ! ss -ltnH 'sport = :{port}' 2>/dev/null | grep -q .; then",
             "  echo 'Remote debugging is already off.'; exit 0",
             "fi",
-        ] + self._matrix_app_relaunch_script(port))
+        ] + self._matrix_app_relaunch_script(port, conn.kiosk_workspace))
 
         try:
             client = connect(self._target(room))
@@ -986,10 +1024,168 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def wake_display(self, room: Room) -> bool:
+    def _admin_app_relaunch_script(self, debug: bool) -> List[str]:
+        """Shell lines that add (or strip) the ``--remote-debugging-*`` flags
+        in the Matrix Admin App launcher (backing it up first), stop any
+        running instance, and start it again through the launcher on its
+        sway workspace unless something restarts it on its own."""
+        conn = self.config.connection
+        port = conn.matrix_admin_app_debug_port
+        flags = f"--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}"
+        marker = f"--remote-debugging-port={port}"
+        return self._sway_session_script() + [
+            'sway_cmd() { runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" swaymsg -s "$sway_socket" "$@" 2>&1; }',
+            f"asar={shlex.quote(conn.matrix_admin_app_asar)}",
+            f"admin_launcher={shlex.quote(conn.matrix_admin_app_launcher_path)}",
+            f"admin_ws={shlex.quote(conn.matrix_admin_workspace)}",
+            f"kiosk_ws={shlex.quote(conn.kiosk_workspace)}",
+            # Scan /proc directly: ps may truncate long command lines when not on a tty.
+            'all_pids() { for p in /proc/[0-9]*; do c=$(tr "\\0" " " < "$p/cmdline" 2>/dev/null) || continue; case "$c" in *electron*"$asar"*) case "$c" in *--type=*) ;; *) echo "${p#/proc/}" ;; esac ;; esac; done; }',
+            'if ! test -f "$admin_launcher"; then echo "Launcher not found: $admin_launcher" >&2; exit 2; fi',
+            "if ! grep -Fq -- '--ozone-platform=wayland' \"$admin_launcher\"; then echo \"Launcher has no supported invocation (no --ozone-platform=wayland):\" >&2; sed 's/^/  /' \"$admin_launcher\" >&2; exit 3; fi",
+            # Like the kiosk app: put the flags in the launcher (backup first), because the
+            # launcher/sway may restart the app on its own and would drop flags passed any other way.
+        ] + ([
+            f"if grep -Fq -- {shlex.quote(marker)} \"$admin_launcher\"; then echo 'DevTools flags already in launcher.'; else",
+            '  backup="${admin_launcher}.matrix-deploy.bak.$(date +%Y%m%d%H%M%S)"; cp -- "$admin_launcher" "$backup"',
+            f"  sed -i 's|--ozone-platform=wayland|--ozone-platform=wayland {flags}|' \"$admin_launcher\"",
+            f"  if ! grep -Fq -- {shlex.quote(marker)} \"$admin_launcher\"; then mv -- \"$backup\" \"$admin_launcher\"; echo 'Could not add flags; launcher restored.' >&2; exit 7; fi",
+            '  echo "DevTools flags added to launcher. Backup: $backup"',
+            "fi",
+        ] if debug else [
+            "if grep -Fq -- '--remote-debugging-port' \"$admin_launcher\"; then",
+            '  backup="${admin_launcher}.matrix-deploy.bak.$(date +%Y%m%d%H%M%S)"; cp -- "$admin_launcher" "$backup"',
+            "  sed -i -E 's/ --remote-debugging-(address|port)=[0-9.]*//g' \"$admin_launcher\"",
+            "  if grep -Fq -- '--remote-debugging-port' \"$admin_launcher\"; then mv -- \"$backup\" \"$admin_launcher\"; echo 'Could not remove flags; launcher restored.' >&2; exit 7; fi",
+            '  echo "DevTools flags removed from launcher. Backup: $backup"',
+            "fi",
+        ]) + [
+            # Stop every running instance and wait for them to exit.
+            'old=$(all_pids)',
+            'if [ -n "$old" ]; then',
+            '  echo "Stopping Matrix Admin App (pid $(echo $old))..."; kill $old 2>/dev/null || true',
+            '  for i in $(seq 1 10); do alive=""; for p in $old; do [ -d "/proc/$p" ] && alive=1; done; [ -z "$alive" ] && break; sleep 1; done',
+            '  for p in $old; do [ -d "/proc/$p" ] && kill -9 "$p" 2>/dev/null; done',
+            'fi',
+            # If the launcher/sway restarts it by itself, it now has the right flags; otherwise start it.
+            'sleep 3',
+            # Disable doesn't start an admin app that wasn't running.
+            f'if [ -z "$(all_pids)" ] && {{ [ -n "$old" ] || {"true" if debug else "false"}; }}; then',
+            '  echo "Starting Matrix Admin App with $admin_launcher..."',
+            # sway puts an exec'd window on the workspace focused at exec time.
+            '  sway_cmd "workspace $admin_ws; exec $admin_launcher" >/dev/null',
+            '  sleep 2',
+            'elif [ -n "$old" ]; then',
+            '  echo "Matrix Admin App restarted on its own."',
+            'fi',
+            # Hand the screen back to the kiosk; Open DevTools brings the admin login screen up.
+            'sway_cmd "workspace $kiosk_ws" >/dev/null && echo "Room screen is on the kiosk."',
+            'echo "Relaunch requested."',
+        ]
+
+    def show_admin_app(self, room: Room, client: Optional[paramiko.SSHClient] = None) -> bool:
+        """Wake the room's display and bring up the Matrix Admin App's login
+        screen by switching to its sway workspace (what the Matrix App's Exit Kiosk
+        Mode does), starting the app if it isn't running. It has to be on
+        screen to take typing/clicks from DevTools and to render screenshots.
+        Requires the sudo password. Reuses ``client`` if given (the caller
+        keeps it open), else opens and closes its own connection."""
+        conn = self.config.connection
+        if not self.creds.sudo_password:
+            self.log("The sudo password is needed to bring up the admin login screen.", "error")
+            return False
+        script = "\n".join(self._sway_session_script() + [
+            'sway_cmd() { runuser -u "$app_user" -- env "XDG_RUNTIME_DIR=$runtime_dir" "WAYLAND_DISPLAY=$wayland_display" "SWAYSOCK=$sway_socket" swaymsg -s "$sway_socket" "$@" 2>&1; }',
+            # Wake a sleeping screen: a powered-off output renders nothing.
+            "sway_cmd 'output * power on' >/dev/null || sway_cmd 'output * dpms on' >/dev/null || true",
+            f"sway_cmd workspace {shlex.quote(conn.matrix_admin_workspace)} >/dev/null || exit 6",
+            f"if ! pgrep -f {shlex.quote(conn.matrix_admin_app_asar)} >/dev/null; then",
+            f"  echo 'Matrix Admin App was not running - starting it.'; sway_cmd exec {shlex.quote(conn.matrix_admin_app_launcher_path)} >/dev/null",
+            "fi",
+        ])
+        own = client is None
+        if own:
+            try:
+                client = connect(self._target(room))
+            except SSHError as exc:
+                self.log(str(exc), "error")
+                return False
+        try:
+            if not self._run_sudo_script(client, script):
+                self.log("Could not switch the room's screen to the admin app.", "error")
+                return False
+            return True
+        finally:
+            if own:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def set_admin_app_debugging(self, room: Room, enable: bool) -> bool:
+        """Enable/disable Chrome DevTools on the Matrix Admin App: add/strip
+        the debug flags in its launcher (backed up first), restart it in the
+        background on its sway workspace, and return the room's screen to the
+        kiosk (Open DevTools brings the admin login screen up when needed).
+        Requires the sudo password."""
+        next_step = ("Next: click Open DevTools. It brings up the admin login screen on the room "
+                     "and opens DevTools, where you type the admin password.")
+        port = self.config.connection.matrix_admin_app_debug_port
+        verb = "Enabling" if enable else "Disabling"
+        self.log(f"=== OR {room.number}: {verb} Matrix Admin App remote debugging ===", "info")
+        if not self.creds.sudo_password:
+            self.log("A sudo password is required to relaunch the Matrix Admin App.", "error")
+            return False
+        try:
+            client = connect(self._target(room))
+        except SSHError as exc:
+            self.log(str(exc), "error")
+            return False
+        try:
+            self._begin(2)
+            # Disable always runs so leftover launcher flags get stripped.
+            if enable and self._devtools_answers(client, port):
+                self.log(f"OR {room.number}: Matrix Admin App DevTools already on (port {port}).", "success")
+                self.log(next_step, "info")
+                self._advance()
+                self._advance()
+                return True
+            if not self._run_sudo_script(client, "\n".join(self._admin_app_relaunch_script(enable))):
+                self.log("Failed to relaunch the Matrix Admin App.", "error")
+                return False
+            self._advance()
+            for _ in range(20):
+                if self.is_cancelled():
+                    return False
+                if self._devtools_answers(client, port) == enable:
+                    self.log(f"OR {room.number}: Matrix Admin App DevTools {'ready' if enable else 'off'} (port {port}).", "success")
+                    if enable:
+                        self.log(next_step, "info")
+                    self._advance()
+                    return True
+                time.sleep(1)
+            self.log(f"Relaunched, but DevTools on port {port} did not turn {'on' if enable else 'off'}.", "error")
+            conn = self.config.connection
+            self.log("Matrix Admin App processes now, and the launcher:", "detail")
+            run_command(
+                client,
+                f"for p in /proc/[0-9]*; do c=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null) || continue; "
+                f"case \"$c\" in *{conn.matrix_admin_app_asar}*) case \"$c\" in *--type=*) ;; *) echo \"  ${{p#/proc/}} $c\";; esac;; esac; done; "
+                f"echo '  --- {conn.matrix_admin_app_launcher_path} ---'; sed 's/^/  /' {shlex.quote(conn.matrix_admin_app_launcher_path)}",
+                on_line=lambda l: self.log(l, "detail"),
+            )
+            return False
+        finally:
+            try:
+                client.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def wake_display(self, room: Room, client: Optional[paramiko.SSHClient] = None) -> bool:
         """Wake a sleeping room display by powering the sway outputs back on
         in the active kiosk session (``output * power on``, falling back to
-        ``dpms on`` on older sway). Requires the sudo password."""
+        ``dpms on`` on older sway). Requires the sudo password. Reuses
+        ``client`` if given (the caller keeps it open)."""
         self.log(f"=== OR {room.number}: Waking display ===", "info")
         if not self.creds.sudo_password:
             self.log("A sudo password is required to wake the display.", "error")
@@ -1001,11 +1197,13 @@ class Deployer:
             'echo "Display outputs powered on."',
         ])
 
-        try:
-            client = connect(self._target(room))
-        except SSHError as exc:
-            self.log(str(exc), "error")
-            return False
+        own = client is None
+        if own:
+            try:
+                client = connect(self._target(room))
+            except SSHError as exc:
+                self.log(str(exc), "error")
+                return False
         try:
             self._begin(1)
             if not self._run_sudo_script(client, script):
@@ -1015,10 +1213,11 @@ class Deployer:
             self.log(f"OR {room.number}: display woken.", "success")
             return True
         finally:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
+            if own:
+                try:
+                    client.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def export_support_bundle(
         self,
@@ -1232,9 +1431,14 @@ class Deployer:
             except Exception:  # noqa: BLE001
                 pass
 
-    def fetch_nms_password(self, room: Room) -> Optional[str]:
-        """Connect to a room and return the parsed ``barco_nms_password``
-        (the default NMS/admin login password), or ``None`` on failure."""
+    def fetch_nms_password(
+        self, room: Room, client: Optional[paramiko.SSHClient] = None
+    ) -> Optional[str]:
+        """Return the room's parsed ``barco_nms_password`` (the default
+        NMS/admin login password), or ``None`` on failure. Reuses ``client``
+        if given, else opens (and closes) its own connection."""
+        if client is not None:
+            return self._fetch_room_password(client, room)
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -1254,7 +1458,9 @@ class Deployer:
         self.log(f"=== OR {room.number}: NMS Password ===", "info")
         password = self.fetch_nms_password(room)
         if password:
-            self.log(f"OR {room.number} ({room.name}): NMS password = {password}", "success")
+            # Never printed: console text can be copied, exported or screenshotted.
+            self.log(f"OR {room.number} ({room.name}): NMS password read. Use the room's NMS button "
+                     "to copy it to the clipboard.", "success")
             return True
         self.log(f"OR {room.number} ({room.name}): NMS password not found.", "error")
         return False
@@ -1351,16 +1557,8 @@ class Deployer:
             return False
         try:
             self._begin(2)
-            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-edited.json"
             # Preserve the user's exact text (trailing newline for POSIX tools).
-            local_tmp.write_text(content.rstrip("\n") + "\n", encoding="utf-8")
-
-            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
-            self.log("Uploading edited config...", "detail")
-            try:
-                upload_file(client, str(local_tmp), remote_staging)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"Config upload failed: {exc}", "error")
+            if not self._stage_matrix_config(client, room, content.rstrip("\n") + "\n"):
                 return False
             self._advance()  # uploaded
 
@@ -1436,17 +1634,7 @@ class Deployer:
                 if isinstance(stream, dict):
                     stream["level"] = level
 
-            local_tmp = Path(tempfile.gettempdir()) / f"or{room.number}-loglevel.json"
-            local_tmp.write_text(
-                json.dumps(data, indent=2) + "\n", encoding="utf-8"
-            )
-
-            remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
-            self.log("Uploading updated config...", "detail")
-            try:
-                upload_file(client, str(local_tmp), remote_staging)
-            except Exception as exc:  # noqa: BLE001
-                self.log(f"Config upload failed: {exc}", "error")
+            if not self._stage_matrix_config(client, room, json.dumps(data, indent=2) + "\n"):
                 return False
             self._advance()  # uploaded
 
@@ -1501,21 +1689,12 @@ class Deployer:
             return None
 
     def _upload_and_apply_matrix_config(
-        self, client: paramiko.SSHClient, room: Room, data: dict, tmp_name: str
+        self, client: paramiko.SSHClient, room: Room, data: dict
     ) -> bool:
-        """Write ``data`` to a local temp file, upload it to the room, and
-        apply it + restart matrix-api. Does not advance/begin milestones -
+        """Upload ``data`` to the room (from memory, never a local temp file)
+        and apply it + restart matrix-api. Does not advance/begin milestones -
         callers own their own step accounting."""
-        conn = self.config.connection
-        local_tmp = Path(tempfile.gettempdir()) / tmp_name
-        local_tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-        remote_staging = f"/home/{conn.ssh_username}/or{room.number}.json"
-        self.log("Uploading updated config...", "detail")
-        try:
-            upload_file(client, str(local_tmp), remote_staging)
-        except Exception as exc:  # noqa: BLE001
-            self.log(f"Config upload failed: {exc}", "error")
+        if not self._stage_matrix_config(client, room, json.dumps(data, indent=2) + "\n"):
             return False
 
         self.log("Applying config and restarting matrix-api...", "detail")
@@ -1633,9 +1812,7 @@ class Deployer:
                 self.log(f"OR {room.number}: already matches - no push, no restart.", "success")
                 self._advance()
                 return True
-            if not self._upload_and_apply_matrix_config(
-                client, room, data, f"or{room.number}-patched.json"
-            ):
+            if not self._upload_and_apply_matrix_config(client, room, data):
                 return False
             self._advance()  # applied
             self.log(
@@ -1688,9 +1865,7 @@ class Deployer:
             else:
                 self.log("All endpoints already trusted.", "detail")
 
-            if not self._upload_and_apply_matrix_config(
-                client, room, data, f"or{room.number}-trustedendpoints.json"
-            ):
+            if not self._upload_and_apply_matrix_config(client, room, data):
                 return False
             self._advance()  # uploaded/applied
 
@@ -1713,7 +1888,8 @@ class Deployer:
 
     # Static apiServer fields that must point at the web app's actual
     # installed dist/support-dump locations, plus the pairing key. Same
-    # value on every room.
+    # value on every room. The well-known QA pairing key is only acceptable
+    # on QA labs (qa_port_forwards); configure_web_app refuses elsewhere.
     WEB_APP_CONFIG_FIELDS = {
         "helpFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
         "appFolder": "/opt/matrix-api-app/dist/arthrex-synergy-matrix",
@@ -1735,6 +1911,13 @@ class Deployer:
         Every other existing field in the config is preserved as-is.
         """
         self.log(f"=== OR {room.number}: Web App Configuration ===", "info")
+        if not self.config.connection.qa_port_forwards:
+            self.log(
+                "Refused: Web App Configuration sets the QA pairing key (masterPairKey 1234), which "
+                "is only allowed on QA labs. This lab is a facility (no QA port forwards).",
+                "error",
+            )
+            return False
         try:
             client = connect(self._target(room))
         except SSHError as exc:
@@ -1777,9 +1960,7 @@ class Deployer:
             else:
                 self.log("Web app paths already set to the desired values.", "detail")
 
-            if not self._upload_and_apply_matrix_config(
-                client, room, data, f"or{room.number}-webappconfig.json"
-            ):
+            if not self._upload_and_apply_matrix_config(client, room, data):
                 return False
             self._advance()  # uploaded/applied
 
@@ -1808,7 +1989,7 @@ class Deployer:
             self.log("Sending reboot command...", "detail")
             # exec_command returns immediately; the reboot will terminate the
             # SSH session from the remote side.
-            client.exec_command(f"{sudo} reboot", get_pty=True)
+            exec_command(client, f"{sudo} reboot", get_pty=True)
             # Give the command a moment to start before we close the local handle.
             time.sleep(2)
         finally:
@@ -1837,7 +2018,7 @@ class Deployer:
             self.log("Sending shutdown command...", "detail")
             # exec_command returns immediately; the shutdown will terminate the
             # SSH session from the remote side.
-            client.exec_command(f"{sudo} shutdown -h now", get_pty=True)
+            exec_command(client, f"{sudo} shutdown -h now", get_pty=True)
             # Give the command a moment to start before we close the local handle.
             time.sleep(2)
         finally:
@@ -1891,9 +2072,12 @@ class Deployer:
                 f"&& {sudo} systemctl restart {shlex.quote(conn.service_name)} "
                 f"&& {sudo} systemctl --no-pager --full status {shlex.quote(conn.service_name)} -n 10"
             )
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
-            )
+            try:
+                exit_status = run_command(
+                    client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+                )
+            finally:
+                self._remove_staging(client, remote_staging)
             if exit_status != 0:
                 self.log("Failed to apply nms-config.json (service restart failed).", "error")
                 return False
@@ -1933,21 +2117,14 @@ class Deployer:
             self.log(str(exc), "error")
             return False
 
-        tmp_path: Optional[str] = None
         try:
             self._begin(2)
             conn = self.config.connection
             remote_staging = f"/home/{conn.ssh_username}/application-user-or{room.number}.yml"
 
-            with tempfile.NamedTemporaryFile(
-                mode="w", suffix=".yml", delete=False, encoding="utf-8"
-            ) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-
             self.log("Uploading application-user.yml...", "detail")
             try:
-                upload_file(client, tmp_path, remote_staging)
+                upload_text(client, content, remote_staging, mode="0644")
             except Exception as exc:  # noqa: BLE001
                 self.log(f"Upload failed: {exc}", "error")
                 return False
@@ -1961,9 +2138,12 @@ class Deployer:
                 f"&& {sudo} systemctl restart {shlex.quote(conn.nms_service_name)} "
                 f"&& {sudo} systemctl --no-pager --full status {shlex.quote(conn.nms_service_name)} -n 10"
             )
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
-            )
+            try:
+                exit_status = run_command(
+                    client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
+                )
+            finally:
+                self._remove_staging(client, remote_staging)
             if exit_status != 0:
                 self.log("Failed to apply application-user.yml (service restart failed).", "error")
                 return False
@@ -1975,11 +2155,6 @@ class Deployer:
                 self.log(f"OR {room.number}: NMS interop bandwidth set to {bandwidth_kbps}.", "success")
             return True
         finally:
-            if tmp_path:
-                try:
-                    Path(tmp_path).unlink(missing_ok=True)
-                except Exception:  # noqa: BLE001
-                    pass
             try:
                 client.close()
             except Exception:  # noqa: BLE001
@@ -2026,114 +2201,6 @@ class Deployer:
             )
         return self.deploy_nms_link_bandwidth(room, bandwidth_kbps, remove_overlay=True)
 
-    def deploy_matrix_api_certs(self, room: Room) -> bool:
-        """Disable the cert-init/unseal units, generate a fresh self-signed
-        matrix.api server cert/key pair, fix ownership/permissions, and
-        restart the matrix-api service so it picks up the new cert."""
-        self.log(f"=== OR {room.number}: Regenerating matrix-api certs ===", "info")
-        try:
-            client = connect(self._target(room))
-        except SSHError as exc:
-            self.log(str(exc), "error")
-            return False
-        try:
-            self._begin(1)
-            conn = self.config.connection
-            sudo = self._sudo_prefix()
-            cert_dir = "/usr/lib/node_modules/matrix.api"
-            key_path = f"{cert_dir}/server-key.pem"
-            cert_path = f"{cert_dir}/server-cert.pem"
-            subj = "/C=US/O=Arthrex/OU=Engineering/CN=Arthrex Matrix API"
-            san = (
-                "subjectAltName=DNS:$(hostname),DNS:$(hostname -s),"
-                "DNS:localhost,IP:127.0.0.1,IP:::1"
-            )
-            cmd = (
-                f"{sudo} systemctl disable --now "
-                f"matrix-api-certs-init.service matrix-api-certs-unseal.service "
-                f"&& {sudo} install -d -m 0755 {shlex.quote(cert_dir)} "
-                f"&& {sudo} openssl req -x509 -newkey rsa:2048 -nodes -days 3650 "
-                f"-keyout {shlex.quote(key_path)} -out {shlex.quote(cert_path)} "
-                f'-subj "{subj}" '
-                f'-addext "{san}" '
-                f'-addext "keyUsage=critical,digitalSignature,keyEncipherment" '
-                f'-addext "extendedKeyUsage=serverAuth" '
-                f"&& {sudo} chown act-app:act-app {shlex.quote(key_path)} {shlex.quote(cert_path)} "
-                f"&& {sudo} chmod 600 {shlex.quote(key_path)} "
-                f"&& {sudo} chmod 644 {shlex.quote(cert_path)} "
-                f"&& {sudo} sed -i "
-                f"'s/Requires=matrix-api-certs-unseal\\.service/#Requires=matrix-api-certs-unseal.service/' "
-                f"/usr/lib/systemd/system/matrix-api.service "
-                f"&& {sudo} systemctl restart {shlex.quote(conn.service_name)}"
-            )
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
-            )
-            self._advance()
-            if exit_status != 0:
-                self.log("Failed to regenerate matrix-api certs.", "error")
-                return False
-            self.log(f"OR {room.number}: matrix-api certs regenerated.", "success")
-            return True
-        finally:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
-
-    def fix_room_config_race(self, room: Room) -> bool:
-        """Patch matrix-room-config-generator.service's ``After=`` ordering to
-        also wait on barco-nms-network-init.service.
-
-        Without this, matrix-room-config-generator can start before barco-nms
-        has assigned the room's IP, causing it to grab the wrong/incorrect
-        address (race condition). The sed is idempotent - a second run is a
-        harmless no-op once the line has already been patched. Takes effect
-        on the unit's next start (e.g. next reboot); does not restart
-        anything itself.
-        """
-        self.log(
-            f"=== OR {room.number}: Patching matrix-room-config-generator "
-            "service ordering ===",
-            "info",
-        )
-        try:
-            client = connect(self._target(room))
-        except SSHError as exc:
-            self.log(str(exc), "error")
-            return False
-        try:
-            self._begin(1)
-            sudo = self._sudo_prefix()
-            unit = "/usr/lib/systemd/system/matrix-room-config-generator.service"
-            cmd = (
-                f"{sudo} sed -i "
-                f"'s/^After=barco-nms\\.service redis\\.service "
-                f"act-kiosk-redis-svc\\.service$/After=barco-nms.service "
-                f"barco-nms-network-init.service redis.service "
-                f"act-kiosk-redis-svc.service/' {shlex.quote(unit)} "
-                f"&& {sudo} systemctl daemon-reload "
-                f"&& grep -n '^After=' {shlex.quote(unit)}"
-            )
-            exit_status = run_command(
-                client, cmd, get_pty=True, on_line=lambda l: self.log(l, "detail")
-            )
-            self._advance()
-            if exit_status != 0:
-                self.log("Failed to patch matrix-room-config-generator.service.", "error")
-                return False
-            self.log(
-                f"OR {room.number}: race-condition fix applied "
-                "(takes effect next start/reboot).",
-                "success",
-            )
-            return True
-        finally:
-            try:
-                client.close()
-            except Exception:  # noqa: BLE001
-                pass
-
     def remove_known_hosts_entry(self, room: Room) -> bool:
         """Remove any cached SSH host key for this room's host:port from the
         local known_hosts file (equivalent to ``ssh-keygen -R "[host]:port"``).
@@ -2150,6 +2217,15 @@ class Deployer:
             f"=== OR {room.number}: Removing cached SSH fingerprint for {target} ===",
             "info",
         )
+        try:
+            if forget_host_key(conn.router_ip, port):
+                self.log("Forgot the host key this app had pinned; the next connection trusts the room's new key.", "detail")
+            nms = urlparse(room.nms_api_base_url or f"https://{conn.router_ip}:{room.nms_external_port(conn.nms_port_base)}")
+            if tls_pins.forget(nms.hostname, nms.port or 443):
+                self.log("Forgot the room's pinned NMS certificate too.", "detail")
+        except OSError as exc:
+            self.log(f"Couldn't update {exc.filename}: {exc}", "error")
+            return False
         try:
             result = subprocess.run(
                 ["ssh-keygen", "-R", target],
@@ -2364,8 +2440,8 @@ class Deployer:
 
     def _sudo_prefix(self) -> str:
         """Return a sudo invocation that supplies the password when available."""
-        if self.creds.sudo_password:
-            # -S reads the password from stdin; -p '' suppresses the prompt text.
-            quoted = shlex.quote(self.creds.sudo_password)
-            return f"echo {quoted} | sudo -S -p ''"
-        return "sudo"
+        # The password goes over stdin, never the command line (see
+        # ssh_client.sudo_prefix), so commands must run via run_command /
+        # ssh_client.exec_command on a client connected with self._target().
+        # -S reads the password from stdin; -p '' suppresses the prompt text.
+        return sudo_prefix(self.creds.sudo_password)

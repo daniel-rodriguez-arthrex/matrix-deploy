@@ -93,6 +93,21 @@ class ConnectionConfig:
     # Launcher script the Matrix App kiosk is started from; remote debugging is
     # enabled by injecting the debug flags here and relaunching via sway.
     matrix_app_launcher_path: str = "/usr/share/matrix-app/matrix-app-launcher.sh"
+    # Matrix Admin App: a separate Electron app shown after exiting kiosk
+    # mode. DevTools is enabled like the kiosk app (flags in its launcher),
+    # on its own port.
+    matrix_admin_app_debug_port: int = 9223
+    matrix_admin_app_asar: str = "matrix-admin-app.asar"
+    matrix_admin_app_launcher_path: str = "/usr/share/matrix-admin-app/matrix-admin-app-launcher.sh"
+    # The admin app's own login page, reloaded if it's ever left on a broken page.
+    matrix_admin_app_start_url: str = (
+        "file:///usr/share/matrix-admin-app/matrix-admin-app.asar/node_modules/"
+        "@matrix-admin-app/ui/dist/index.html#/admin/authenticate"
+    )
+    # Sway workspaces act-kiosk switches between on "exit kiosk" / "exit to
+    # kiosk" (SetFocusedSwayWorkspace in matrix-app-linux / matrix-admin-app).
+    matrix_admin_workspace: str = "matrix-admin"
+    kiosk_workspace: str = "act-sway-kiosk"
     same_physical_host: bool = True
     # Web app (Matrix Electron web app + matrix.api backend) deploy targets,
     # used by Deployer.deploy_web_app/reset_web_app/diagnose_web_app. Ported
@@ -105,7 +120,14 @@ class ConnectionConfig:
     # SSH/SWU/API/NMS ports on the router's WAN interface.
     swu_port_base: int = 300
     nms_port_base: int = 11000
+    # Barco NMS REST/GraphQL login (Lab Status tab). The password is the
+    # room's act-mfg-eeprom barco_nms_password.
+    nms_username: str = "admin"
+    nms_graphql_path: str = "/api/graphql"
     router_wan_interface: str = "GigabitEthernet0/0/0"
+    # QA labs also forward SSH/SWU/NMS per room (200+n, 300+n, 11000+n) for
+    # testing. A real facility only gets the planner's API forward (10000+n).
+    qa_port_forwards: bool = True
 
 
 @dataclass(frozen=True)
@@ -260,6 +282,8 @@ class AppConfig:
     rooms: List[Room] = field(default_factory=list)
     site_name: Optional[str] = None
     path: Optional[str] = None
+    # Switch/router layout from an imported facility planner zip (facility.py).
+    facility: Optional[dict] = None
     _rooms_by_number: Dict[int, Room] = field(default_factory=dict, repr=False)
 
     def __post_init__(self) -> None:
@@ -296,4 +320,5 @@ class AppConfig:
             rooms=rooms,
             site_name=_profile_name(data, path),
             path=str(path),
+            facility=data.get("facility"),
         )

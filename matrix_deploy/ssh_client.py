@@ -5,12 +5,15 @@ All deployment logic uses this module so connection handling lives in one place.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import socket
+import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from pathlib import Path
+from typing import Callable, Dict, Optional
 
 import paramiko
 from scp import SCPClient
@@ -28,10 +31,94 @@ class SSHTarget:
     port: int
     username: str
     password: Optional[str] = None
+    # Fed to commands that use ``sudo_prefix`` (see ``exec_command``).
+    sudo_password: Optional[str] = None
 
 
 class SSHError(Exception):
     """Raised when an SSH operation fails."""
+
+
+# -- sudo without the password on the command line ----------------------
+# ``echo <pw> | sudo -S`` puts the password in the remote shell's command
+# line, which any account on the room PC can read (``ps`` / /proc/*/cmdline).
+# Instead commands reference a shell variable that the remote shell fills
+# from the first line of stdin with the ``read`` builtin.
+SUDO_PW_VAR = "MD_SUDO_PW"
+_SUDO_PW_REF = f'"${SUDO_PW_VAR}"'
+
+
+def sudo_prefix(password: Optional[str]) -> str:
+    """``sudo`` for a command run through ``exec_command``/``run_command``."""
+    return f"printf '%s\\n' {_SUDO_PW_REF} | sudo -S -p ''" if password else "sudo"
+
+
+def exec_command(client: paramiko.SSHClient, command: str, get_pty: bool = False):
+    """``client.exec_command`` that supplies the sudo password over stdin when
+    ``command`` uses ``sudo_prefix``. The password comes from the
+    ``SSHTarget.sudo_password`` the client was connected with."""
+    secret = getattr(client, "md_sudo_password", None)
+    uses_secret = _SUDO_PW_REF in command
+    if uses_secret:
+        if not secret:
+            raise SSHError("This command needs the sudo password, but none was provided.")
+        command = f"IFS= read -r {SUDO_PW_VAR}; {command}"
+    stdin, stdout, stderr = client.exec_command(command, get_pty=get_pty)
+    if uses_secret:
+        stdin.write(secret + "\n")
+        stdin.flush()
+    return stdin, stdout, stderr
+
+
+def redact(client: paramiko.SSHClient, text: str) -> str:
+    """Hide the sudo password in output (a PTY echoes what stdin sent)."""
+    secret = getattr(client, "md_sudo_password", None)
+    return text.replace(secret, "<hidden>") if secret and secret in text else text
+
+
+# -- host key pinning ---------------------------------------------------
+# Trust on first use: the first key seen for host:port is saved; a later
+# different key is refused (a re-imaged room, or someone impersonating it to
+# collect the passwords we're about to send). Per Windows user, outside the
+# app folder so it never ships.
+KNOWN_HOSTS = Path(os.environ.get("APPDATA") or Path.home()) / "MatrixFacilityManager" / "known_hosts"
+_KNOWN_HOSTS_LOCK = threading.Lock()
+
+
+def _known_hosts() -> paramiko.HostKeys:
+    keys = paramiko.HostKeys()
+    if KNOWN_HOSTS.exists():
+        keys.load(str(KNOWN_HOSTS))
+    return keys
+
+
+def _save_known_hosts(keys: paramiko.HostKeys) -> None:
+    KNOWN_HOSTS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = KNOWN_HOSTS.with_suffix(".tmp")
+    keys.save(str(tmp))
+    os.replace(tmp, KNOWN_HOSTS)
+
+
+class _TrustOnFirstUse(paramiko.MissingHostKeyPolicy):
+    def missing_host_key(self, client, hostname, key):
+        with _KNOWN_HOSTS_LOCK:
+            keys = _known_hosts()
+            keys.add(hostname, key.get_name(), key)
+            _save_known_hosts(keys)
+        client.get_host_keys().add(hostname, key.get_name(), key)
+
+
+def forget_host_key(host: str, port: int) -> bool:
+    """Drop the pinned key for host:port (after a room was re-imaged).
+    Returns True if one was saved."""
+    name = host if port == 22 else f"[{host}]:{port}"
+    with _KNOWN_HOSTS_LOCK:
+        keys = _known_hosts()
+        if name not in keys:
+            return False
+        del keys[name]
+        _save_known_hosts(keys)
+    return True
 
 
 # Requesting a PTY (needed for sudo password prompts and colorized/paged
@@ -49,47 +136,58 @@ def strip_ansi(text: str) -> str:
     return _ANSI_CSI_RE.sub("", text)
 
 
-def connect(target: SSHTarget, timeout: int = 10) -> paramiko.SSHClient:
-    """Connect using an SSH key first, falling back to password.
+def connect(target: SSHTarget, timeout: int = 10, try_keys: bool = True) -> paramiko.SSHClient:
+    """Connect with the password if one is given, falling back to SSH keys.
 
-    Raises ``SSHError`` with a descriptive message if both methods fail.
+    Password first because the labs use passwords: trying local keys first
+    cost an extra failed handshake (2-4 s per room). ``try_keys=False`` never
+    tries keys: network gear (Cisco) drops the session after a few failed
+    attempts, which local keys use up.
+
+    Raises ``SSHError`` with a descriptive message if every method fails.
     """
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    def attempt(use_keys: bool) -> paramiko.SSHClient:
+        client = paramiko.SSHClient()
+        with _KNOWN_HOSTS_LOCK:
+            if KNOWN_HOSTS.exists():
+                client.load_host_keys(str(KNOWN_HOSTS))
+        client.set_missing_host_key_policy(_TrustOnFirstUse())
+        try:
+            client.connect(hostname=target.host, port=target.port, username=target.username,
+                           password=None if use_keys else target.password, timeout=timeout,
+                           look_for_keys=use_keys, allow_agent=use_keys)
+            client.md_sudo_password = target.sudo_password
+            return client
+        except paramiko.BadHostKeyException as exc:
+            raise SSHError(
+                f"Refused {target.host}:{target.port}: its SSH host key changed since this computer last "
+                "connected. If the room was re-imaged or the device replaced, use Actions > Remove "
+                "Fingerprint for it (or delete its line in "
+                f"{KNOWN_HOSTS}). Otherwise something may be impersonating it - don't connect."
+            ) from exc
+        except (OSError, EOFError) as exc:
+            # Timeout / refused / unreachable: another method would just
+            # wait out the same timeout again.
+            raise SSHError(f"No answer from {target.host}:{target.port} ({exc or 'connection closed'})") from exc
 
-    key_error: Optional[Exception] = None
+    password_error: Optional[Exception] = None
+    if target.password:
+        try:
+            return attempt(use_keys=False)
+        except SSHError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - keys may still work
+            password_error = exc
+    if not try_keys:
+        raise SSHError(f"SSH auth failed for {target.username}@{target.host}:{target.port}: "
+                       f"{password_error or 'no password provided'}")
     try:
-        client.connect(
-            hostname=target.host,
-            port=target.port,
-            username=target.username,
-            timeout=timeout,
-            look_for_keys=True,
-            allow_agent=True,
-        )
-        return client
-    except Exception as exc:  # noqa: BLE001 - we re-raise with context below
-        key_error = exc
-
-    if not target.password:
-        raise SSHError(
-            f"SSH key auth failed for {target.username}@{target.host}:{target.port} "
-            f"and no password was provided ({key_error})"
-        )
-
-    try:
-        client.connect(
-            hostname=target.host,
-            port=target.port,
-            username=target.username,
-            password=target.password,
-            timeout=timeout,
-        )
-        return client
+        return attempt(use_keys=True)
+    except SSHError:
+        raise
     except Exception as exc:  # noqa: BLE001
-        raise SSHError(
-            f"SSH auth failed for {target.username}@{target.host}:{target.port}: {exc}"
-        ) from exc
+        detail = f"password: {password_error}; key: {exc}" if password_error else f"key auth failed and no password was provided ({exc})"
+        raise SSHError(f"SSH auth failed for {target.username}@{target.host}:{target.port}: {detail}") from exc
 
 
 def run_command(
@@ -103,7 +201,7 @@ def run_command(
     Returns the remote exit status. stderr is merged into the stream when
     ``get_pty`` is True; otherwise it is appended after stdout.
     """
-    stdin, stdout, stderr = client.exec_command(command, get_pty=get_pty)
+    stdin, stdout, stderr = exec_command(client, command, get_pty=get_pty)
     if on_line is not None:
         for raw in stdout:
             # PTY sessions terminate lines with "\r\n"; strip both so a
@@ -114,12 +212,14 @@ def run_command(
                 # from `systemctl status`) that render as garbage in our
                 # plain-text log views.
                 line = strip_ansi(line)
-            on_line(line)
+            line = redact(client, line)
+            if line.strip() != "<hidden>":  # the PTY's echo of the password line
+                on_line(line)
     exit_status = stdout.channel.recv_exit_status()
     if on_line is not None and not get_pty:
         err = stderr.read().decode(errors="replace").strip()
         if err:
-            on_line(err)
+            on_line(redact(client, err))
     return exit_status
 
 
@@ -172,6 +272,13 @@ def upload_file(
             f"({rate:.2f} MB/s).",
             "detail",
         )
+
+
+def upload_text(client: paramiko.SSHClient, text: str, remote_path: str, mode: str = "0600") -> None:
+    """Upload ``text`` straight from memory (no local temp file) as an
+    owner-only file. Room configs hold API keys and passwords."""
+    with SCPClient(client.get_transport()) as scp:
+        scp.putfo(io.BytesIO(text.encode("utf-8")), remote_path, mode=mode)
 
 
 def upload_dir(
@@ -327,6 +434,68 @@ def run_cisco_config_commands(
     Raises ``SSHError`` if the device asks for an enable password that
     wasn't provided.
     """
+    return _cisco_session(client, commands, enable_password, log, configure=True)
+
+
+def run_cisco_show(
+    client: paramiko.SSHClient,
+    commands: list,
+    enable_password: Optional[str] = None,
+) -> str:
+    """Read-only counterpart of ``run_cisco_config_commands``: enters
+    privileged EXEC (``show running-config`` needs it), runs each ``show``
+    command and returns the transcript. Never enters config mode."""
+    return _cisco_session(client, commands, enable_password, None, configure=False)
+
+
+# The CLI prompt as the last line of output: Cisco "Router#" / "Router>",
+# EXOS "* QALAB-Switch1.3 # ". Banner art like "####" doesn't match.
+_PROMPT_RE = re.compile(r"(?:^|\n)\*?\s*[\w.\-()/:]+ ?[#>]\s*$")
+_PASSWORD_PROMPT_RE = re.compile(r"[Pp]assword:\s*$")
+
+
+def _read_until_prompt(chan, timeout: float, also: Optional["re.Pattern[str]"] = None) -> str:
+    """Read until the output ends at a CLI prompt (or matches ``also``).
+    Polls quickly instead of sleeping a fixed time per command; returns what
+    arrived if the prompt doesn't show up within ``timeout``."""
+    buf = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if chan.recv_ready():
+            buf += chan.recv(65536)
+            text = strip_ansi(buf.decode(errors="replace"))
+            if _PROMPT_RE.search(text) or (also and also.search(text)):
+                return text
+        elif chan.closed or chan.exit_status_ready():
+            break
+        else:
+            time.sleep(0.05)
+    return strip_ansi(buf.decode(errors="replace"))
+
+
+def run_cli_show(client: paramiko.SSHClient, commands: list, setup: tuple = (), timeout: float = 20) -> Dict[str, str]:
+    """Run read-only commands in a network device's interactive CLI (e.g.
+    Extreme EXOS) and return ``{command: output}``. ``setup`` commands (like
+    ``disable clipaging``) run first and aren't returned. Each command waits
+    until the prompt comes back."""
+    chan = client.invoke_shell(width=250)
+    chan.settimeout(timeout)
+
+    def _run(cmd: str) -> str:
+        if cmd:
+            chan.send(cmd + "\n")
+        return _read_until_prompt(chan, timeout)
+
+    try:
+        _run("")
+        for cmd in setup:
+            _run(cmd)
+        return {cmd: _run(cmd) for cmd in commands}
+    finally:
+        chan.close()
+
+
+def _cisco_session(client, commands, enable_password, log, configure: bool) -> str:
     chan = client.invoke_shell()
     chan.settimeout(10)
     transcript: list = []
@@ -346,9 +515,20 @@ def run_cisco_config_commands(
                 break
         return strip_ansi(buf.decode(errors="replace"))
 
-    def _send(cmd: str, wait: float = 0.8) -> str:
+    # Read-only sessions wait for the prompt instead of fixed sleeps (~3.5 s
+    # saved per router read). Config sessions keep the proven fixed timing.
+    fast = not configure
+
+    def _send(cmd: str, wait: float = 0.8, until_prompt: bool = False) -> str:
         chan.send(cmd + "\n")
-        out = _drain(wait)
+        if fast:
+            out = _read_until_prompt(chan, 20, _PASSWORD_PROMPT_RE)
+        else:
+            out = _drain(wait)
+            # Long show output can trickle in; keep reading until the prompt is back.
+            deadline = time.time() + 20
+            while until_prompt and not out.rstrip().endswith(("#", ">")) and time.time() < deadline:
+                out += _drain(0.5)
         transcript.append(out)
         if log:
             for line in out.splitlines():
@@ -358,7 +538,7 @@ def run_cisco_config_commands(
         return out
 
     try:
-        banner = _drain(1.2)
+        banner = _read_until_prompt(chan, 10) if fast else _drain(1.2)
         transcript.append(banner)
         if log:
             for line in banner.splitlines():
@@ -372,11 +552,13 @@ def run_cisco_config_commands(
             _send(enable_password)
 
         _send("terminal length 0")
-        _send("configure terminal")
+        if configure:
+            _send("configure terminal")
         for command in commands:
-            _send(command)
-        _send("end")
-        _send("write memory", wait=2.0)
+            _send(command, until_prompt=not configure)
+        if configure:
+            _send("end")
+            _send("write memory", wait=2.0)
     finally:
         chan.close()
 

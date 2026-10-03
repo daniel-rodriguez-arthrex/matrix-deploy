@@ -5,7 +5,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
-<title>Matrix Deploy</title>
+<title>Matrix Facility Manager</title>
 <style>
   html, body { height: 100%; margin: 0; }
   body {
@@ -32,27 +32,30 @@
   <div class="mark">
     <svg viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
   </div>
-  <h1>Matrix Deploy</h1>
+  <h1>Matrix Facility Manager</h1>
   <p id="msg">Starting&hellip;</p>
   <div class="bar"></div>
 </div>
 <script>
-  const port = new URLSearchParams(location.search).get("port") || "8420";
+  const params = new URLSearchParams(location.search);
+  const port = /^\d+$/.test(params.get("port") || "") ? params.get("port") : "8420";
   const target = `http://127.0.0.1:${port}/`;
+  // This launch's sign-in token (see LocalOnlyGuard in server.py).
+  const signIn = `${target}?t=${encodeURIComponent(params.get("t") || "")}`;
   const started = Date.now();
   async function poll() {
     try {
       // no-cors: from a file:// page we can't read the reply, but the request
       // only succeeds once the server is actually listening.
       await fetch(`${target}api/health`, { mode: "no-cors", cache: "no-store" });
-      location.replace(target);
+      location.replace(signIn);
       return;
     } catch (_) { /* not up yet */ }
     const waited = (Date.now() - started) / 1000;
     if (waited > 45) {
       document.getElementById("box").classList.add("err");
       document.getElementById("msg").textContent =
-        "Matrix Deploy didn't start. Check its console window for the reason, then close this " +
+        "Matrix Facility Manager didn't start. Check its console window for the reason, then close this " +
         "window and try again.";
       return;
     }

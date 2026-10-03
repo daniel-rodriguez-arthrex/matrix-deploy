@@ -20,6 +20,8 @@ config/*.json
 
 # Per-lab credential files (plaintext SSH/sudo/switch/router passwords).
 config/*.env
+# QA lock (password hash; ships in the app build, not in git).
+config/qa_lock.cfg
 
 # Local artifacts
 *.swu

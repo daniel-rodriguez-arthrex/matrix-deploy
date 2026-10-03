@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Entry point for Matrix Deploy (also ``MatrixDeploy.exe``, see ``build_exe.ps1``).
+"""Entry point for Matrix Facility Manager (also ``MatrixDeploy.exe``, see ``build_exe.ps1``).
 
 Starts a local-only (127.0.0.1) web server and opens the UI in its own app
 window (Chrome/Edge ``--app`` mode: no tabs or address bar, falling back to
@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -65,7 +66,7 @@ def _find_open_port(host: str, preferred: int) -> int:
 
 
 def _is_matrix_deploy(port: int) -> bool:
-    """True if a Matrix Deploy server answers on ``port``."""
+    """True if a Matrix Facility Manager server answers on ``port``."""
     try:
         with urllib.request.urlopen(f"http://{HOST}:{port}/api/health", timeout=0.5) as resp:
             return json.load(resp).get("app") == "matrix-deploy"
@@ -74,7 +75,7 @@ def _is_matrix_deploy(port: int) -> bool:
 
 
 def _running_instance(preferred: int) -> Optional[int]:
-    """Port of an already-running Matrix Deploy near ``preferred`` (the same
+    """Port of an already-running Matrix Facility Manager near ``preferred`` (the same
     range ``_find_open_port`` uses), so a second double-click reuses it even
     if something else took the preferred port. Probes with bind(), which is
     instant: connecting to a closed port on Windows waits out the timeout,
@@ -89,6 +90,18 @@ def _running_instance(preferred: int) -> Optional[int]:
         if _is_matrix_deploy(port):
             return port
     return None
+
+
+def _session_file(port: int) -> Path:
+    """Per Windows user (APPDATA), never in the app folder."""
+    return Path(os.environ.get("APPDATA") or Path.home()) / "MatrixFacilityManager" / f"session-{port}"
+
+
+def _read_session_token(port: int) -> Optional[str]:
+    try:
+        return _session_file(port).read_text(encoding="ascii").strip() or None
+    except OSError:
+        return None
 
 
 def _app_browser() -> Optional[str]:
@@ -116,7 +129,7 @@ def _open_window(url: str) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Matrix Deploy.")
+    parser = argparse.ArgumentParser(description="Run Matrix Facility Manager.")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Preferred port (default: 8420)")
     parser.add_argument("--no-browser", action="store_true", help="Do not open the app window")
     parser.add_argument("--check", action="store_true", help="Run the Setup Check, print it and exit (1 on problems)")
@@ -139,25 +152,33 @@ def main() -> None:
 
     if args.check:
         checks = run_preflight(config, config_error, network_timeout=2.0)
-        report = f"Matrix Deploy - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
+        report = f"Matrix Facility Manager - Setup Check\n{'=' * 60}\n{format_report(checks)}\n{'=' * 60}"
         print(report)
         sys.exit(0 if summarize(checks)["ok"] else 1)
     if config is None:
-        _fail("Matrix Deploy can't start:\n\n" + format_report(run_preflight(None, config_error, network=False)))
+        _fail("Matrix Facility Manager can't start:\n\n" + format_report(run_preflight(None, config_error, network=False)))
 
     running = _running_instance(args.port)
     if running:
         url = f"http://{HOST}:{running}"
-        print(f"Matrix Deploy is already running at {url}")
+        print(f"Matrix Facility Manager is already running at {url}")
         if not args.no_browser:
-            _open_window(url)
+            token = _read_session_token(running)
+            _open_window(f"{url}/?t={token}" if token else url)
         return
 
     port = _find_open_port(HOST, args.port)
     url = f"http://{HOST}:{port}"
+    # The API only answers windows opened with this launch's token (see
+    # LocalOnlyGuard in server.py). Saved per Windows user so a second
+    # double-click can open another signed-in window.
+    token = secrets.token_urlsafe(32)
+    session_file = _session_file(port)
+    session_file.parent.mkdir(parents=True, exist_ok=True)
+    session_file.write_text(token, encoding="ascii")
     # Show the loading screen now; it switches to the app once the server answers.
     if not args.no_browser:
-        _open_window(f"{(STATIC_DIR / 'splash.html').as_uri()}?port={port}")
+        _open_window(f"{(STATIC_DIR / 'splash.html').as_uri()}?port={port}&t={token}")
 
     try:
         import uvicorn
@@ -167,8 +188,8 @@ def main() -> None:
         _fail(f"Missing dependency: {exc}. Run: pip install -r requirements.txt")
 
     # Console summary; the network check runs in the app (Settings > Setup Check).
-    print(f"Matrix Deploy - Setup Check\n{format_report(run_preflight(config, network=False))}")
-    app = create_app(config)
+    print(f"Matrix Facility Manager - Setup Check\n{format_report(run_preflight(config, network=False))}")
+    app = create_app(config, api_token=token)
     server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning" if FROZEN else "info"))
 
     if auto_exit:
@@ -182,10 +203,18 @@ def main() -> None:
 
         threading.Thread(target=watchdog, daemon=True).start()
 
-    print(f"\nMatrix Deploy is running at {url}")
-    print("This window closes by itself when you close the Matrix Deploy window."
+    print(f"\nMatrix Facility Manager is running at {url}")
+    if args.no_browser:
+        print(f"Open this link to sign in (valid until this app stops): {url}/?t={token}")
+    print("This window closes by itself when you close the Matrix Facility Manager window."
           if auto_exit else "Press Ctrl+C to stop.")
-    server.run()
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        # uvicorn re-raises Ctrl+C after its graceful shutdown; nothing is wrong.
+        print("Matrix Facility Manager stopped.")
+    finally:
+        session_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

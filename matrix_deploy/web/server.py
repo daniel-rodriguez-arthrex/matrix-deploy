@@ -10,45 +10,80 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hmac
+import ipaddress
+import json as json_mod
 import queue
+import re
 import shlex
 import socket
 import tempfile
 import threading
 import time
 import uuid
+from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..artifactory import ArtifactoryClient, ArtifactoryCredentials, ArtifactoryError
-from ..config import AppConfig, Room, list_profiles
+from ..config import AppConfig, Room, config_dir, list_profiles
+from .. import facility as facility_mod
 from ..deployer import DeploymentCredentials, DeploymentRequest, Deployer
 from ..env_settings import (
     PATH_FIELDS,
     active_env_paths,
     default_env_path,
     load_merged_env,
+    parse_env_file,
     profile_env_path,
+    protect_env_files,
     save_env_values,
 )
+from ..lab_status import collect_room_status
+from .. import qa_lock, switch_status
 from ..preflight import run_preflight, summarize
 from ..jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
-from ..ssh_client import SSHError, SSHTarget, connect, run_cisco_config_commands
+from ..ssh_client import SSHError, SSHTarget, connect, redact, run_cisco_config_commands, run_cisco_show, sudo_prefix
+from ..ssh_client import exec_command as ssh_exec_command
 from .. import webapp_builder
 from .tunnel import (
     TunnelManager,
     build_inspector_url,
     capture_cdp_screenshot,
-    make_devtools_proxy,
+    cdp_call,
+    first_page,
+    largest_page_first,
 )
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 ARTIFACTS_DIR = Path(tempfile.gettempdir()) / "matrix_deploy_web_artifacts"
+# Logs/journals/support bundles can hold secrets; they're only a download cache.
+ARTIFACT_MAX_AGE = 7 * 24 * 3600
+# Room configs older builds staged in %TEMP% (API keys, passwords in plaintext).
+_LEGACY_TEMP_CONFIG_RE = re.compile(r"or\d+-(edited|loglevel|patched|trustedendpoints|webappconfig)\.json")
+
+
+def cleanup_temp_files() -> None:
+    """Delete expired artifacts and the plaintext room configs that earlier
+    versions left in %TEMP%."""
+    now = time.time()
+    for p in ARTIFACTS_DIR.glob("*") if ARTIFACTS_DIR.is_dir() else []:
+        try:
+            if p.is_file() and now - p.stat().st_mtime > ARTIFACT_MAX_AGE:
+                p.unlink()
+        except OSError:
+            pass
+    for p in Path(tempfile.gettempdir()).glob("or*-*.json"):
+        if _LEGACY_TEMP_CONFIG_RE.fullmatch(p.name):
+            try:
+                p.unlink()
+            except OSError:
+                pass
 # Default folder for downloaded SWU builds.
 DEFAULT_SWU_CACHE_DIR = Path.home() / "Desktop" / "latest-matrix-wrynose"
 
@@ -71,8 +106,6 @@ SIMPLE_ACTIONS = {
     "get_nms_password",
     "set_log_debug",
     "configure_web_app",
-    "matrix_api_certs",
-    "fix_room_config_race",
     "check_disk_space",
     "check_uptime",
     "check_specs",
@@ -84,13 +117,111 @@ SIMPLE_ACTIONS = {
     "add_trusted_endpoint",
     "enable_matrix_app_debug",
     "disable_matrix_app_debug",
+    "enable_admin_app_debug",
+    "disable_admin_app_debug",
     "wake_display",
     "reset_web_app",
     "diag_web_app",
 }
 
+# Room actions behind the QA lock (Tunnels and Web App tabs, and Actions >
+# NMS Configuration); see qa_lock.py.
+QA_ACTIONS = {
+    "enable_matrix_app_debug", "disable_matrix_app_debug", "enable_admin_app_debug", "disable_admin_app_debug",
+    "wake_display", "configure_web_app", "reset_web_app", "diag_web_app",
+    "nms_bandwidth", "nms_link_bandwidth", "remove_overlay",
+    # Arbitrary shell commands (optionally as root) on the rooms.
+    "run_command",
+    # Not get_nms_password: every team gets room NMS logins (sidebar NMS
+    # button, /api/room/nms-password, Facility check).
+}
+
 # "Fetch" actions save an artifact file AND stream content to the console.
 FETCH_ACTIONS = {"get_logs", "get_full_journal", "export_bundle"}
+
+_LOCAL_HOSTNAMES = {"127.0.0.1", "localhost"}
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; script-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; font-src 'self'; "
+    "img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+
+
+class LocalOnlyGuard:
+    """Only serve the app's own pages. Binding to 127.0.0.1 isn't enough: any
+    website the user visits can send requests to localhost (CSRF) or point
+    its own hostname at 127.0.0.1 (DNS rebinding) and then read ``/api/setup``
+    or start jobs. So: the Host must be 127.0.0.1/localhost, and anything that
+    changes state (non-GET, WebSocket) must come from this origin. Browsers
+    always send Origin on those; non-browser local tools send none.
+
+    With an ``api_token`` (run_server.py makes a new one per launch), the API
+    also needs the session cookie that ``/?t=<token>`` sets, so other programs
+    or Windows users on this computer can't use it either."""
+
+    def __init__(self, app: Any, api_token: Optional[str] = None) -> None:
+        self.app = app
+        self.api_token = api_token
+
+    async def __call__(self, scope: Dict[str, Any], receive: Callable, send: Callable) -> None:
+        if scope["type"] in ("http", "websocket"):
+            problem = self._problem(scope)
+            if problem:
+                if scope["type"] == "websocket":
+                    await send({"type": "websocket.close", "code": 1008, "reason": problem})
+                else:
+                    from starlette.responses import PlainTextResponse
+                    await PlainTextResponse(problem, status_code=403)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+    def _problem(self, scope: Dict[str, Any]) -> Optional[str]:
+        headers = {k.decode("latin1").lower(): v.decode("latin1") for k, v in scope.get("headers", [])}
+        host = headers.get("host", "")
+        if host.rsplit(":", 1)[0].lower() not in _LOCAL_HOSTNAMES:
+            return "Refused: unexpected Host header."
+        origin = headers.get("origin")
+        unsafe = scope["type"] == "websocket" or scope.get("method") not in _SAFE_METHODS
+        if unsafe and origin is not None and origin.lower() != f"http://{host}".lower():
+            return "Refused: cross-origin request."
+        # The file:// splash page polls /api/health; nothing else is used cross-site.
+        path = scope.get("path", "")
+        if headers.get("sec-fetch-site") == "cross-site" and path.startswith("/api/") and path != "/api/health":
+            return "Refused: cross-site request."
+        if self.api_token and path.startswith(("/api/", "/ws/")) and path != "/api/health":
+            cookies = SimpleCookie()
+            try:
+                cookies.load(headers.get("cookie", ""))
+            except CookieError:
+                pass
+            got = cookies.get(session_cookie_name(host))
+            if not got or not hmac.compare_digest(got.value, self.api_token):
+                return "Refused: not signed in. Open Matrix Facility Manager from MatrixDeploy.exe (or run_server.py)."
+        return None
+
+
+_SIGN_IN_PAGE = (
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Matrix Facility Manager</title></head>"
+    "<body style='font-family:sans-serif;max-width:36em;margin:4em auto'><h2>Matrix Facility Manager</h2>"
+    "<p>This window isn't signed in to the running app. Open it again from <b>MatrixDeploy.exe</b> "
+    "(or <code>python run_server.py</code>); a second launch reuses the running app.</p></body></html>"
+)
+
+
+_SIGNED_IN_PAGE = (
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='0;url=/'>"
+    "<title>Matrix Facility Manager</title></head>"
+    "<body style='font-family:sans-serif;max-width:36em;margin:4em auto'><p>Signing in&hellip; "
+    "<a href='/'>Continue</a></p></body></html>"
+)
+
+
+def session_cookie_name(host: str) -> str:
+    """Per port: cookies are shared by every port on 127.0.0.1."""
+    port = host.rsplit(":", 1)[1] if ":" in host else "80"
+    return f"md_session_{port}"
 
 
 class Job:
@@ -310,7 +441,7 @@ class JobManager:
         def run() -> None:
             job.emit({"type": "log", "message": f"Connecting to router {router_ip}:22 as {admin_username}...", "level": "info"})
             try:
-                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password))
+                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password), try_keys=False)
             except SSHError as exc:
                 job.emit({"type": "log", "message": f"SSH connection failed: {exc}", "level": "error"})
                 job.finish()
@@ -518,6 +649,7 @@ class JobManager:
                 port=room.ssh_port(conn.ssh_port_base),
                 username=conn.ssh_username,
                 password=creds.ssh_password,
+                sudo_password=creds.sudo_password,
             )
             try:
                 client = connect(target)
@@ -527,14 +659,10 @@ class JobManager:
                 return
             channel = None
             try:
-                prefix = ""
-                if creds.sudo_password:
-                    prefix = f"echo {shlex.quote(creds.sudo_password)} | sudo -S -p '' "
+                prefix = f"{sudo_prefix(creds.sudo_password)} " if creds.sudo_password else ""
                 cmd = f"{prefix}journalctl -fu {shlex.quote(service)} -n 50 --no-pager".strip()
-                channel = client.get_transport().open_session()
-                channel.get_pty()
+                channel = ssh_exec_command(client, cmd, get_pty=True)[1].channel
                 channel.settimeout(1.0)
-                channel.exec_command(cmd)
                 job.emit({"type": "log", "message": f"--- Watching {service} live (Cancel to stop) ---", "level": "info"})
                 buf = ""
                 while not job.cancel_event.is_set():
@@ -547,7 +675,9 @@ class JobManager:
                     buf += chunk.decode(errors="replace")
                     while "\n" in buf:
                         line, buf = buf.split("\n", 1)
-                        job.emit({"type": "log", "message": line.rstrip("\r"), "level": "detail"})
+                        line = redact(client, line.rstrip("\r"))
+                        if line.strip() != "<hidden>":  # the PTY's echo of the password line
+                            job.emit({"type": "log", "message": line, "level": "detail"})
                 job.emit({"type": "log", "message": f"--- Stopped watching {service} ---", "level": "warning"})
             except Exception as exc:  # noqa: BLE001
                 job.emit({"type": "log", "message": f"Log stream error: {exc}", "level": "error"})
@@ -629,10 +759,6 @@ def _dispatch_action(deployer: Deployer, room: Room, action: str, params: Dict[s
         return deployer.add_trusted_endpoint(room, endpoint)
     if action == "configure_web_app":
         return deployer.configure_web_app(room)
-    if action == "matrix_api_certs":
-        return deployer.deploy_matrix_api_certs(room)
-    if action == "fix_room_config_race":
-        return deployer.fix_room_config_race(room)
     if action == "check_disk_space":
         return deployer.check_disk_space(room)
     if action == "check_uptime":
@@ -647,6 +773,8 @@ def _dispatch_action(deployer: Deployer, room: Room, action: str, params: Dict[s
         return deployer.enable_matrix_app_debugging(room)
     if action == "disable_matrix_app_debug":
         return deployer.disable_matrix_app_debugging(room)
+    if action in ("enable_admin_app_debug", "disable_admin_app_debug"):
+        return deployer.set_admin_app_debugging(room, action == "enable_admin_app_debug")
     if action == "wake_display":
         return deployer.wake_display(room)
     if action == "reset_web_app":
@@ -763,12 +891,51 @@ class SaveCredentialsRequest(BaseModel):
     router_admin_username: Optional[str] = None
     router_admin_password: Optional[str] = None
     router_enable_password: Optional[str] = None
+    windows_password: Optional[str] = None
+    switch_password: Optional[str] = None
 
 
 class RouterApplyNatRequest(BaseModel):
     router_admin_username: str
     router_admin_password: str
     router_enable_password: Optional[str] = None
+    # The (possibly hand-edited) command text from the UI. None = the full plan.
+    commands: Optional[List[str]] = None
+
+
+# Apply to Router only sends static NAT rules (or their "no" form to remove
+# one); anything else is refused so an edit can't run arbitrary router config.
+_NAT_RULE_RE = re.compile(
+    r"^(no )?ip nat inside source static (tcp|udp) \d+\.\d+\.\d+\.\d+ \d+ (interface \S+|\d+\.\d+\.\d+\.\d+) \d+( extendable)?$"
+)
+# Wrapper lines from the copy-paste block; the apply job adds these itself.
+_NAT_WRAPPERS = {"configure terminal", "conf t", "end", "write memory", "wr", "exit"}
+
+
+def validate_nat_commands(lines: List[str]) -> Tuple[List[str], List[str]]:
+    """``(commands, rejected)`` from the editor text: blank lines, ``!``
+    comments and the configure/end/write wrappers are dropped."""
+    commands, rejected = [], []
+    for raw in lines:
+        line = " ".join(raw.split())
+        if not line or line.startswith("!") or line.lower() in _NAT_WRAPPERS:
+            continue
+        (commands if _NAT_RULE_RE.match(line) else rejected).append(line)
+    return commands, rejected
+
+
+class RouterLiveRequest(BaseModel):
+    """Blank fields fall back to the router login saved for this lab."""
+    router_admin_username: Optional[str] = None
+    router_admin_password: Optional[str] = None
+    router_enable_password: Optional[str] = None
+
+
+class FacilityImportRequest(BaseModel):
+    upload_id: str
+    # "new" = add as its own lab, else the path of an existing profile to update.
+    target: str = "new"
+    qa_port_forwards: bool = True
 
 
 class SavePathsRequest(BaseModel):
@@ -785,12 +952,35 @@ class ProfileSelectRequest(BaseModel):
     path: str
 
 
+class TeamRequest(BaseModel):
+    team: Literal["qa", "integration"]
+
+
+class QaUnlockRequest(BaseModel):
+    password: str
+    remember: bool = False
+
+
+class QaPasswordRequest(BaseModel):
+    password: str
+
+
 class MatrixAppInspectRequest(BaseModel):
     room_number: int
     ssh_password: Optional[str] = None
+    # Needed for the admin app (bringing its login screen up uses sudo).
+    sudo_password: Optional[str] = None
+    # "matrix" = kiosk Matrix App, "admin" = Matrix Admin App.
+    app: Literal["matrix", "admin"] = "matrix"
 
 
 class NmsPasswordRequest(BaseModel):
+    room_number: int
+    ssh_password: Optional[str] = None
+    sudo_password: Optional[str] = None
+
+
+class LabStatusRequest(BaseModel):
     room_number: int
     ssh_password: Optional[str] = None
     sudo_password: Optional[str] = None
@@ -803,13 +993,33 @@ class StreamLogsRequest(BaseModel):
     sudo_password: Optional[str] = None
 
 
-def create_app(config: Optional[AppConfig] = None) -> FastAPI:
-    """Build the FastAPI app. ``config`` defaults to ``AppConfig.load()``."""
+def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = None) -> FastAPI:
+    """Build the FastAPI app. ``config`` defaults to ``AppConfig.load()``.
+    ``api_token``: see ``LocalOnlyGuard`` (``None`` = no sign-in, for tests)."""
     app_config = config or AppConfig.load()
+    # Encrypt plaintext saved secrets (hand-edited, or lab passwords shipped
+    # in the build) for this Windows user before anything else reads them.
+    try:
+        protect_env_files([default_env_path(), *config_dir().glob("*.env")])
+    except OSError as exc:
+        print(f"Warning: couldn't encrypt saved passwords: {exc}")
+    cleanup_temp_files()
     jobs = JobManager()
     tunnels = TunnelManager()
     presence = Presence()
-    app = FastAPI(title="Matrix Deploy")
+    # QA lock (qa_lock.py): unlocked for this app session after the QA password.
+    qa_session = {"unlocked": False}
+
+    def qa_status() -> Dict[str, bool]:
+        lock = qa_lock.is_configured()
+        return {"lock": lock, "unlocked": not lock or qa_session["unlocked"] or qa_lock.remembered()}
+
+    def require_qa() -> None:
+        if not qa_status()["unlocked"]:
+            raise HTTPException(status_code=403, detail=(
+                "This is a QA-only feature. Unlock it with the QA password under Settings > Your team."))
+
+    app = FastAPI(title="Matrix Facility Manager")
     # For run_server.py's auto-quit watchdog.
     app.state.idle_seconds = lambda: presence.idle_seconds(jobs.active_count())
 
@@ -848,6 +1058,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "number": r.number,
                 "room_id": r.room_id,
                 "name": r.name,
+                "secondary": r.secondary,
                 "demonstrator_url": r.demonstrator_gui_url(router_ip),
                 "web_app_url": r.web_app_url(router_ip),
             }
@@ -867,60 +1078,295 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         }
 
     def _router_nat_plan(config: AppConfig):
-        """Return ``(rooms, commands)``: the per-room port table and the flat
-        list of ``ip nat inside source static`` lines for the active router."""
+        """Return ``(rooms, commands)``: the per-room forwards and the flat
+        list of ``ip nat inside source static`` lines for the active router.
+        API (10000+n) is the facility forward every site gets; SSH/SWU/NMS are
+        QA test access, only planned when ``qa_port_forwards`` is on."""
         conn = config.connection
         iface = conn.router_wan_interface
         rooms = []
         commands = []
         for r in config.rooms:
-            ssh_p = r.ssh_port(conn.ssh_port_base)
-            swu_p = r.swu_external_port(conn.swu_port_base)
-            api_p = r.api_external_port()
-            nms_p = r.nms_external_port(conn.nms_port_base)
-            rooms.append({
-                "number": r.number,
-                "name": r.name,
-                "room_id": r.room_id,
-                "ssh_port": ssh_p,
-                "swu_port": swu_p,
-                "api_port": api_p,
-                "nms_port": nms_p,
-            })
-            commands.extend([
-                f"ip nat inside source static tcp {r.room_id} 22 interface {iface} {ssh_p}",
-                f"ip nat inside source static tcp {r.room_id} {conn.swu_service_port} interface {iface} {swu_p}",
-                f"ip nat inside source static tcp {r.room_id} 443 interface {iface} {api_p}",
-                f"ip nat inside source static tcp {r.room_id} 8443 interface {iface} {nms_p}",
-            ])
+            kinds = [("api", 443, r.api_external_port(), "facility")]
+            if conn.qa_port_forwards:
+                kinds = [
+                    ("ssh", 22, r.ssh_port(conn.ssh_port_base), "qa"),
+                    ("swu", conn.swu_service_port, r.swu_external_port(conn.swu_port_base), "qa"),
+                    *kinds,
+                    ("nms", 8443, r.nms_external_port(conn.nms_port_base), "qa"),
+                ]
+            forwards = {k: {"inside_port": ip, "outside_port": op, "source": src} for k, ip, op, src in kinds}
+            rooms.append({"number": r.number, "name": r.name, "room_id": r.room_id, "forwards": forwards})
+            commands.extend(
+                f"ip nat inside source static tcp {r.room_id} {f['inside_port']} interface {iface} {f['outside_port']}"
+                for f in forwards.values()
+            )
         return rooms, commands
 
     @app.get("/api/router-ports")
     def router_ports() -> Dict[str, Any]:
         """Per-room NAT port-forwarding plan for the active site's router,
-        plus ready-to-paste Cisco config (see ROUTER_PORT_FORWARDING_PATTERN.md)."""
+        ready-to-paste Cisco config (see ROUTER_PORT_FORWARDING_PATTERN.md),
+        and the switch/router layout from an imported facility config."""
         conn = app_config.connection
         rooms, commands = _router_nat_plan(app_config)
         nat_script = "configure terminal\n" + "\n".join(commands) + "\nend\nwrite memory\n"
+        fac = app_config.facility or {}
         return {
             "site_name": app_config.site_name,
             "router_ip": conn.router_ip,
             "wan_interface": conn.router_wan_interface,
-            "ssh_port_base": conn.ssh_port_base,
-            "swu_port_base": conn.swu_port_base,
-            "api_port_base": 10000,
-            "nms_port_base": conn.nms_port_base,
+            "qa_port_forwards": conn.qa_port_forwards,
             "rooms": rooms,
             "nat_script": nat_script,
+            "facility": {
+                "site_code": fac.get("site_code"),
+                "version": fac.get("version"),
+                "hostname": (fac.get("router") or {}).get("hostname"),
+                "switches": fac.get("switches") or [],
+                # Planned devices per room (Network tab "expected vs seen").
+                "rooms": {n: {"extron": meta.get("extron") or []} for n, meta in (fac.get("rooms") or {}).items()},
+            } if fac else None,
         }
+
+    def _nat_target_label(ip: str, port: int) -> str:
+        """What a NAT rule points at, from the rooms and facility layout."""
+        service = {22: "SSH", 443: "HTTPS", 8443: "NMS", 9222: "DevTools (Matrix App)",
+                   9223: "DevTools (Admin App)"}.get(port, f"port {port}")
+        fac = app_config.facility or {}
+        for room in app_config.rooms:
+            if room.room_id == ip:
+                return f"{room.name} {service}"
+        for n, meta in (fac.get("rooms") or {}).items():
+            if ip in (meta.get("extron") or []):
+                return f"OR {n} Extron {service}"
+        for sw in fac.get("switches") or []:
+            if any(v.get("ip") == ip for v in sw.get("vlans", [])):
+                return f"{sw.get('name') or 'Switch'} {service}"
+        for sw in fac.get("switches") or []:
+            for v in sw.get("vlans", []):
+                if v.get("kind") == "room" and v.get("ip") and v.get("prefix") and \
+                        ipaddress.ip_address(ip) in ipaddress.ip_network(f"{v['ip']}/{v['prefix']}", strict=False):
+                    return f"OR {v['room']} network device {service}"
+        return service
+
+    # Live router NAT rules per lab (profile path), from the last router read.
+    live_nat_cache: Dict[str, List[Dict[str, Any]]] = {}
+
+    def _read_router_nat(req: Optional[RouterLiveRequest] = None) -> List[Dict[str, Any]]:
+        """Read-only: the router's static NAT rules (never enters config mode)."""
+        req = req or RouterLiveRequest()
+        env, secrets = load_merged_env(app_config.path)
+        # Planner sites use the router's "admin" account.
+        user = req.router_admin_username or env.get("router_admin_username") or "admin"
+        password = req.router_admin_password or secrets.get("router_admin_password")
+        enable = req.router_enable_password or secrets.get("router_enable_password")
+        if not password:
+            raise HTTPException(status_code=400, detail="No router login saved for this lab. Add it under Settings > Edit saved credentials > Router, switches & Windows.")
+        try:
+            client = connect(SSHTarget(host=app_config.connection.router_ip, port=22, username=user, password=password), try_keys=False)
+        except SSHError as exc:
+            raise HTTPException(status_code=502, detail=f"Couldn't log in to the router: {exc}")
+        try:
+            out = run_cisco_show(client, ["show running-config | include ip nat inside source static"], enable_password=enable)
+        except SSHError as exc:
+            raise HTTPException(status_code=502, detail=str(exc))
+        finally:
+            client.close()
+        live = [r for line in out.splitlines() if (r := facility_mod.parse_nat_line(line.strip()))]
+        live_nat_cache[app_config.path or ""] = live
+        return live
+
+    @app.post("/api/router/live-nat")
+    def router_live_nat(req: RouterLiveRequest) -> Dict[str, Any]:
+        """Read-only: compare the router's real NAT rules with the plan."""
+        live = _read_router_nat(req)
+        by_port = {r["outside_port"]: r for r in live}
+        rooms, _ = _router_nat_plan(app_config)
+        status: Dict[str, str] = {}
+        conflicts: Dict[str, Dict[str, Any]] = {}
+        planned = set()
+        for room in rooms:
+            for f in room["forwards"].values():
+                planned.add(f["outside_port"])
+                got = by_port.get(f["outside_port"])
+                ok = got and got["inside_ip"] == room["room_id"] and got["inside_port"] == f["inside_port"]
+                status[str(f["outside_port"])] = "ok" if ok else ("conflict" if got else "missing")
+                if got and not ok:
+                    # What the router actually forwards this port to instead.
+                    conflicts[str(f["outside_port"])] = {"inside_ip": got["inside_ip"], "inside_port": got["inside_port"],
+                                                         "label": _nat_target_label(got["inside_ip"], got["inside_port"])}
+        other = sorted((r for r in live if r["outside_port"] not in planned), key=lambda r: r["outside_port"])
+        for r in other:
+            r["label"] = _nat_target_label(r["inside_ip"], r["inside_port"])
+        return {"checked_at": time.time(), "rule_count": len(live), "status": status, "conflicts": conflicts, "other": other}
+
+    def _device_label(ip: Optional[str]) -> str:
+        """Name a device seen on a switch port from what the lab profile knows."""
+        if not ip:
+            return ""
+        fac = app_config.facility or {}
+        for room in app_config.rooms:
+            if room.room_id == ip:
+                return f"{room.name} PC"
+            if not room.secondary and room.trusted_endpoint() == ip:
+                return f"{room.name} Secondary PC"
+        for n, meta in (fac.get("rooms") or {}).items():
+            if ip in (meta.get("extron") or []):
+                return f"OR {n} Extron"
+        if any(i.get("ip") == ip for i in (fac.get("router") or {}).get("inside_interfaces", [])):
+            return "Router"
+        return ""
+
+    @app.post("/api/switches/live")
+    def switches_live() -> Dict[str, Any]:
+        """Read-only: link state and the devices (IP / MAC / vendor) on every
+        port of every switch in the facility config. Switches are reached
+        through the router's SSH forwards to their VLAN gateway IPs."""
+        fac = app_config.facility or {}
+        switches = fac.get("switches") or []
+        if not switches:
+            raise HTTPException(status_code=400, detail="Import this lab's facility config first (Settings > Facility config).")
+        live = live_nat_cache.get(app_config.path or "") or _read_router_nat()
+        env, secrets = load_merged_env(app_config.path)
+        raw = parse_env_file(_lab_env_path())
+        user = env.get("switch_username") or "admin"
+
+        def one(i: int, sw: Dict[str, Any]) -> Dict[str, Any]:
+            ips = {v.get("ip") for v in sw.get("vlans", []) if v.get("ip")}
+            fwd = next((r for r in live if r["inside_port"] == 22 and r["inside_ip"] in ips), None)
+            base = {"name": sw.get("name"), "number": sw.get("number")}
+            if not fwd:
+                return {**base, "error": "No SSH forward to this switch on the router."}
+            password = raw.get(f"MATRIX_SWITCH_{i}_PASSWORD") or secrets.get("switch_password")
+            if not password:
+                return {**base, "error": "No switch password saved for this lab (Edit saved credentials > Router, switches & Windows)."}
+            try:
+                data = switch_status.read_switch(app_config.connection.router_ip, fwd["outside_port"], user, password)
+            except SSHError as exc:
+                return {**base, "error": str(exc), "ssh_port": fwd["outside_port"]}
+            for p in data["ports"].values():
+                for d in p["devices"]:
+                    d["label"] = _device_label(d["ip"])
+            return {**base, "ssh_port": fwd["outside_port"], **data}
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(switches)) as pool:
+            results = list(pool.map(lambda a: one(*a), enumerate(switches)))
+        return {"checked_at": time.time(), "switches": results}
+
+    # Uploaded facility zips waiting for the user to confirm the import. Only
+    # the parsed result is kept (in memory), never the zip itself.
+    pending_imports: Dict[str, Dict[str, Any]] = {}
+
+    def _import_candidates(parsed: Dict[str, Any]) -> Dict[str, Any]:
+        """Existing labs this export could update: the one previously
+        imported from the same site code, and any using the same router."""
+        fac = parsed["facility"]
+        same_site, same_router = None, []
+        for p in list_profiles():
+            try:
+                data = json_mod.loads(Path(p.path).read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError):
+                continue
+            if (data.get("facility") or {}).get("site_code") == fac["site_code"]:
+                same_site = {"path": p.path, "name": p.name, "data": data}
+            elif data.get("connection", {}).get("router_ip") == fac["router"]["wan_ip"]:
+                same_router.append({"path": p.path, "name": p.name, "data": data})
+        return {"same_site": same_site, "same_router": same_router}
+
+    @app.post("/api/facility/preview")
+    async def facility_preview(request: Request) -> Dict[str, Any]:
+        """Parse an uploaded facility planner zip (raw request body) and
+        describe what importing it would do. Nothing is written yet."""
+        data = await request.body()
+        try:
+            parsed = facility_mod.parse_facility_zip(data, request.headers.get("x-filename", ""))
+        except facility_mod.FacilityError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        fac = parsed["facility"]
+        cands = _import_candidates(parsed)
+        upload_id = uuid.uuid4().hex
+        pending_imports.clear()
+        pending_imports[upload_id] = parsed
+        same = cands["same_site"]
+        new_path = facility_mod.profile_path_for(fac["site_code"], config_dir())
+        return {
+            "upload_id": upload_id,
+            "site_code": fac["site_code"],
+            "facility_name": fac["facility_name"],
+            "version": fac["version"],
+            "router": {k: fac["router"][k] for k in ("hostname", "wan_ip", "wan_interface")},
+            "rooms": [{"number": r["number"], "room_id": r["room_id"], "name": r["name"]} for r in parsed["rooms"]],
+            "switches": [{"name": s["name"], "model": s["model"],
+                          "rooms": [v["room"] for v in s["vlans"] if v["kind"] == "room"]} for s in fac["switches"]],
+            "credentials": sorted(parsed["secrets"]),
+            "warnings": parsed["warnings"],
+            "new_lab_file": new_path.name,
+            "update": {"path": same["path"], "name": same["name"],
+                       "version": same["data"]["facility"].get("version"),
+                       "changes": facility_mod.diff_summary(same["data"].get("facility"), same["data"].get("rooms", []), parsed),
+                       "qa_port_forwards": same["data"].get("connection", {}).get("qa_port_forwards", True)} if same else None,
+            "same_router": [{"path": c["path"], "name": c["name"]} for c in cands["same_router"]],
+        }
+
+    @app.post("/api/facility/import")
+    def facility_import(req: FacilityImportRequest) -> Dict[str, Any]:
+        """Write the previewed export as a lab: ``config/<site>.json`` (no
+        secrets) + its ``.env`` (passwords), then switch to it."""
+        nonlocal app_config
+        parsed = pending_imports.get(req.upload_id)
+        if not parsed:
+            raise HTTPException(status_code=400, detail="Upload expired - choose the zip again.")
+        cands = _import_candidates(parsed)
+        allowed = {c["path"]: c for c in ([cands["same_site"]] if cands["same_site"] else []) + cands["same_router"]}
+        if req.target == "new":
+            path, base = facility_mod.profile_path_for(parsed["facility"]["site_code"], config_dir()), None
+            if path.exists() and str(path) not in allowed:
+                raise HTTPException(status_code=409, detail=f"{path.name} already exists and belongs to another lab.")
+            if str(path) in allowed:
+                base = allowed[str(path)]["data"]
+        elif req.target in allowed:
+            path, base = Path(req.target), allowed[req.target]["data"]
+        else:
+            raise HTTPException(status_code=400, detail="That lab can't be updated from this export.")
+        artifactory = json_mod.loads(Path(app_config.path).read_text(encoding="utf-8-sig"))["artifactory"] if app_config.path else {}
+        profile = facility_mod.build_profile(parsed, base, artifactory, req.qa_port_forwards)
+        sec = parsed["secrets"]
+        env_path = profile_env_path(path)
+        _, saved = load_merged_env(str(path)) if path.exists() else ({}, {})
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json_mod.dumps(profile, indent=2) + "\n", encoding="utf-8")
+            save_env_values(env_path, {
+                **{k: sec.get(k) for k in ("windows_password", "nms_password", "extron_password", "site_api_key", "ic_key")},
+                # The planner's Windows password is the rooms' SSH/sudo login;
+                # don't overwrite one the lab already has saved.
+                "ssh_password": None if saved.get("ssh_password") else sec.get("windows_password"),
+                "sudo_password": None if saved.get("sudo_password") else sec.get("windows_password"),
+            })
+            app_config = AppConfig.load(path)
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(status_code=500, detail=f"Import failed: {exc}")
+        pending_imports.pop(req.upload_id, None)
+        return {"active": app_config.path, "active_name": app_config.site_name, "env_path": str(env_path)}
 
     @app.post("/api/router/apply-nat")
     def apply_router_nat(req: RouterApplyNatRequest) -> Dict[str, Any]:
         """Actually SSH into the active site's router and apply the NAT plan:
         enable -> configure terminal -> the ip nat lines -> end -> write
         memory. Runs as a background job so the console streams the live
-        transcript (see JobManager.start_router_apply)."""
-        _, commands = _router_nat_plan(app_config)
+        transcript (see JobManager.start_router_apply). Applies the UI's
+        command text when given (only static NAT lines are accepted)."""
+        if req.commands is None:
+            _, commands = _router_nat_plan(app_config)
+        else:
+            commands, rejected = validate_nat_commands(req.commands)
+            if rejected:
+                raise HTTPException(status_code=400, detail=(
+                    "Only 'ip nat inside source static ...' lines (or 'no ip nat ...' to remove one) can be applied. "
+                    "Not allowed: " + "; ".join(rejected[:5]) + (" ..." if len(rejected) > 5 else "")))
+            if not commands:
+                raise HTTPException(status_code=400, detail="No NAT rules to apply - pick at least one rule.")
         job = jobs.start_router_apply(
             app_config.connection.router_ip,
             req.router_admin_username,
@@ -1009,6 +1455,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "artifactory_email": env.get("artifactory_email", ""),
                 "jenkins_username": env.get("jenkins_username", ""),
                 "router_admin_username": env.get("router_admin_username", ""),
+                "team": env.get("team", ""),
                 **{f: env.get(f, "") for f in PATH_FIELDS},
             },
             "secrets": {
@@ -1018,7 +1465,12 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "jenkins_token": secrets.get("jenkins_token", ""),
                 "router_admin_password": secrets.get("router_admin_password", ""),
                 "router_enable_password": secrets.get("router_enable_password", ""),
+                "windows_password": secrets.get("windows_password", ""),
+                "switch_password": secrets.get("switch_password", ""),
             },
+            "facility": {k: (app_config.facility or {}).get(k) for k in ("site_code", "facility_name", "version", "source_file")}
+            if app_config.facility else None,
+            "qa": qa_status(),
             "env_path": str(env_path),
             "lab_env_path": str(_lab_env_path()),
             "env_present": bool(env or secrets),
@@ -1041,6 +1493,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "router_admin_username": req.router_admin_username,
                 "router_admin_password": req.router_admin_password,
                 "router_enable_password": req.router_enable_password,
+                "windows_password": req.windows_password,
+                "switch_password": req.switch_password,
             })
             save_env_values(shared_path, {
                 "artifactory_email": req.artifactory_email,
@@ -1048,9 +1502,82 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
                 "jenkins_username": req.jenkins_username,
                 "jenkins_token": req.jenkins_token,
             })
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Could not save credentials: {exc}")
         return {"lab_env_path": str(lab_path), "shared_env_path": str(shared_path)}
+
+    @app.post("/api/setup/team")
+    def save_team(req: TeamRequest) -> Dict[str, Any]:
+        """Which team this computer's user is on, saved to the root .env (per
+        machine, never shipped, so every coworker is asked once). Choosing QA
+        needs the QA password when a QA lock is set; choosing Integration
+        locks the QA features again on this computer."""
+        if req.team == "qa":
+            require_qa()
+        try:
+            save_env_values(default_env_path(), {"team": req.team})
+            if req.team == "integration" and qa_lock.is_configured():
+                qa_session["unlocked"] = False
+                qa_lock.save_token("")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save team: {exc}")
+        return {"team": req.team, "qa": qa_status()}
+
+    @app.post("/api/qa/unlock")
+    def qa_unlock(req: QaUnlockRequest) -> Dict[str, Any]:
+        """Unlock the QA-only features with the shared QA password (for this
+        app session, or remembered on this computer)."""
+        if qa_lock.is_configured():
+            if not qa_lock.check_password(req.password):  # slows down guessing itself
+                raise HTTPException(status_code=403, detail="Wrong QA password.")
+            qa_session["unlocked"] = True
+            try:
+                qa_lock.save_token(qa_lock.remember_token(req.password) if req.remember else "")
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"Unlocked, but couldn't remember this computer: {exc}")
+        return {"qa": qa_status()}
+
+    @app.post("/api/qa/password")
+    def qa_set_password(req: QaPasswordRequest) -> Dict[str, Any]:
+        """Set or change the shared QA password (needs QA access already).
+        Writes config/qa_lock.cfg (hash only), which ships with the build."""
+        require_qa()
+        if len(req.password) < qa_lock.MIN_LENGTH:
+            raise HTTPException(status_code=400, detail=f"Use at least {qa_lock.MIN_LENGTH} characters.")
+        try:
+            token = qa_lock.set_password(req.password)
+            qa_lock.save_token(token)  # the person who set it stays unlocked here
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not save the QA password: {exc}")
+        qa_session["unlocked"] = True
+        return {"qa": qa_status()}
+
+    @app.post("/api/qa/remove")
+    def qa_remove_password() -> Dict[str, Any]:
+        """Remove the QA lock (needs QA access): every team member sees QA tabs again."""
+        require_qa()
+        try:
+            qa_lock.remove_lock()
+            qa_lock.save_token("")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not remove the QA password: {exc}")
+        return {"qa": qa_status()}
+
+    @app.post("/api/qa/lock")
+    def qa_lock_now() -> Dict[str, Any]:
+        """Lock the QA features again on this computer (forget "remember")."""
+        qa_session["unlocked"] = False
+        try:
+            qa_lock.save_token("")
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not forget this computer: {exc}")
+        return {"qa": qa_status()}
 
     @app.post("/api/setup/save-paths")
     def save_paths(req: SavePathsRequest) -> Dict[str, Any]:
@@ -1074,6 +1601,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         env_path = default_env_path()
         try:
             save_env_values(env_path, values, allow_clear=True)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         except OSError as exc:
             raise HTTPException(status_code=500, detail=f"Could not save folders: {exc}")
         return {"saved_to": str(env_path), "warnings": warnings}
@@ -1100,6 +1629,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/jobs/deploy")
     def start_deploy(req: DeployRequest) -> Dict[str, str]:
+        require_qa()
         rooms = _rooms_by_numbers(req.room_numbers)
         if not req.swu_file:
             raise HTTPException(status_code=400, detail="An SWU file path is required")
@@ -1114,6 +1644,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/jobs/webapp-deploy")
     def start_webapp_deploy(req: WebAppDeployRequest) -> Dict[str, str]:
+        require_qa()
         rooms = [] if req.build_only else _rooms_by_numbers(req.room_numbers)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         job = jobs.start_webapp_deploy(app_config, rooms, creds, req)
@@ -1121,6 +1652,8 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/jobs/system-action")
     def start_system_action(req: SystemActionRequest) -> Dict[str, str]:
+        if req.action in QA_ACTIONS:
+            require_qa()
         rooms = _rooms_by_numbers(req.room_numbers)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         params = {
@@ -1158,6 +1691,15 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             )
         return {"room_number": room.number, "password": pw}
 
+    @app.post("/api/lab-status/room")
+    def lab_status_room(req: LabStatusRequest) -> Dict[str, Any]:
+        """Read-only health snapshot of one room (services, NMS devices,
+        license). The UI calls this per room in parallel so cards fill in as
+        each room answers."""
+        room = _one_room(req.room_number)
+        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        return collect_room_status(app_config, creds, room)
+
     @app.post("/api/jobs/stream-logs")
     def start_stream_logs(req: StreamLogsRequest) -> Dict[str, str]:
         room = _one_room(req.room_number)
@@ -1170,6 +1712,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     @app.post("/api/config/load")
     def config_load(req: ConfigLoadRequest) -> Dict[str, Any]:
         """Blocking (threadpool) load of a room's live config for the editor."""
+        require_qa()
         room = _one_room(req.room_number)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         deployer = Deployer(
@@ -1185,6 +1728,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/config/deploy")
     def config_deploy(req: ConfigDeployRequest) -> Dict[str, str]:
+        require_qa()
         room = _one_room(req.room_number)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         job = jobs.start_config_deploy(app_config, room, creds, req.content)
@@ -1194,6 +1738,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     def config_apply_changes(req: ConfigPatchRequest) -> Dict[str, str]:
         """Apply field-level edits to each selected room's own config (not a
         whole-file copy, so room-specific values survive)."""
+        require_qa()
         rooms = _rooms_by_numbers(req.room_numbers)
         creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
         job = jobs.start_config_patch(
@@ -1206,6 +1751,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
     def artifactory_branches() -> List[Dict[str, str]]:
         """Selectable build sources (e.g. wrynose vs MatrixG2-2.0) for the
         download pop-up."""
+        require_qa()
         return [
             {"label": b.label, "build_path": b.build_path, "branch_filter": b.branch_filter}
             for b in app_config.artifactory.available_branches()
@@ -1213,6 +1759,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/jobs/download-latest")
     def start_download_latest(req: DownloadLatestRequest) -> Dict[str, str]:
+        require_qa()
         creds = ArtifactoryCredentials(username=req.artifactory_email, token=req.artifactory_token)
         build_path: Optional[str] = None
         branch_filter: Optional[str] = None
@@ -1242,6 +1789,7 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
 
     @app.post("/api/jobs/trigger-build")
     def start_trigger_build(req: TriggerBuildRequest) -> Dict[str, str]:
+        require_qa()
         creds = JenkinsCredentials(username=req.jenkins_username, token=req.jenkins_token)
         job = jobs.start_trigger_build(creds)
         return {"job_id": job.id}
@@ -1260,95 +1808,146 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Artifact not found")
         return FileResponse(path, filename=safe, media_type="application/octet-stream")
 
-    @app.post("/api/matrix-app/inspect")
-    def matrix_app_inspect(req: MatrixAppInspectRequest) -> Dict[str, Any]:
-        """Tunnel to the room's Matrix App Chrome DevTools port and return an
-        inspector URL (served by the CDP endpoint itself), mirroring the
-        matrix-lab extension's approach."""
-        import requests
+    def _debug_target(which: str):
+        conn = app_config.connection
+        if which == "admin":
+            return conn.matrix_admin_app_debug_port, "Matrix Admin App"
+        return conn.matrix_app_debug_port, "Matrix App"
 
-        room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password)
-        port = app_config.connection.matrix_app_debug_port
+    def _prepared_room_client(room: Room, req: "MatrixAppInspectRequest"):
+        """One SSH connection to the room for both preparing the screen and
+        the DevTools tunnel (saves a second login per click). Wakes the
+        room's display (a sleeping screen renders nothing), and for the admin
+        app also puts its login screen on the display (it must be on screen
+        to accept DevTools input and render screenshots)."""
+        errors: List[str] = []
+        deployer = Deployer(
+            app_config,
+            DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password),
+            log=lambda m, lvl: errors.append(m) if lvl == "error" else None,
+            progress=lambda s, t: None,
+            is_cancelled=lambda: False,
+        )
         try:
-            t = tunnels.open_port(app_config, creds, room, port, f"Matrix App OR {room.number}", scheme="http")
+            client = connect(deployer._target(room))
         except SSHError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
-        except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"Failed to open tunnel: {exc}")
-
         try:
-            resp = requests.get(f"http://127.0.0.1:{t.local_port}/json/list", timeout=6)
-            resp.raise_for_status()
-            targets = resp.json()
+            if req.app == "admin":
+                if not deployer.show_admin_app(room, client):
+                    raise HTTPException(status_code=502, detail=" ".join(errors) or "Could not bring up the admin login screen.")
+            elif req.sudo_password:
+                deployer.wake_display(room, client)  # best effort; DevTools works without it
+        except BaseException:
+            client.close()
+            raise
+        return client
+
+    def _repair_admin_page(base: str, targets: list) -> Optional[list]:
+        """If the admin app is stuck on anything but its own file:// page
+        (e.g. a mistyped address in the DevTools address bar), reload its
+        login page. Returns the fresh target list, or None if nothing was done."""
+        page = first_page(targets)
+        if not page or str(page.get("url", "")).startswith("file://"):
+            return None
+        cdp_call(targets, "Page.navigate", {"url": app_config.connection.matrix_admin_app_start_url})
+        time.sleep(2)
+        return _devtools_targets(base, 5)
+
+    def _devtools_targets(base: str, retries: int) -> list:
+        """Fetch the CDP target list through the tunnel proxy at ``base``,
+        retrying while a just-started app comes up."""
+        import requests
+
+        for attempt in range(retries):
+            try:
+                resp = requests.get(f"{base}/json/list", timeout=6)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception:  # noqa: BLE001
+                if attempt == retries - 1:
+                    raise
+                time.sleep(1)
+        return []
+
+    def _open_devtools_tunnel(room: Room, req: "MatrixAppInspectRequest", label: str, settle: float = 0):
+        """Prepare the room's screen (then wait ``settle`` s) and open a
+        token-protected DevTools tunnel. Returns ``(tunnel, targets,
+        repaired)``; closes the tunnel and raises HTTPException on failure."""
+        port, app_name = _debug_target(req.app)
+        client = _prepared_room_client(room, req)
+        time.sleep(settle)
+        try:
+            t = tunnels.open_port(room.number, port, label, client)
         except Exception as exc:  # noqa: BLE001
+            client.close()
+            raise HTTPException(status_code=502, detail=f"Failed to open tunnel: {exc}")
+        try:
+            targets = _devtools_targets(t.base, 10 if req.app == "admin" else 1)
+        except Exception:  # noqa: BLE001
             tunnels.close(t.id)
             raise HTTPException(
                 status_code=502,
-                detail=f"Matrix App DevTools not reachable on port {port} - is the app running with "
-                       f"remote debugging enabled? ({exc})",
+                detail=f"DevTools is off for the {app_name} on OR {room.number} - click Enable DevTools first.",
             )
+        targets = largest_page_first(targets)
+        repaired = False
+        if req.app == "admin":
+            try:
+                fresh = _repair_admin_page(t.base, targets)
+            except Exception:  # noqa: BLE001 - keep going with what we have
+                fresh = None
+            if fresh:
+                targets, repaired = largest_page_first(fresh), True
+        return t, targets, repaired
 
+    @app.post("/api/matrix-app/inspect")
+    def matrix_app_inspect(req: MatrixAppInspectRequest) -> Dict[str, Any]:
+        """Tunnel to the room's Matrix App Chrome DevTools port and return an
+        inspector URL (served by the CDP endpoint itself, through the tunnel's
+        token-protected proxy), mirroring the matrix-lab extension's approach.
+        The room's screen is woken first, and for the admin app its login
+        screen is brought up (and reloaded if it was left on a broken page)."""
+        require_qa()
+        room = _one_room(req.room_number)
+        _, app_name = _debug_target(req.app)
+        t, targets, repaired = _open_devtools_tunnel(room, req, f"{app_name} OR {room.number}")
         title = ""
         for x in targets:
             if isinstance(x, dict) and x.get("type") == "page":
                 title = x.get("title", "")
                 break
-        # Serve the inspector HTML/assets straight through the raw tunnel
-        # (transparent TCP handles HTTP keep-alive fine), and route only the
-        # WebSocket through a proxy that strips the Origin header - which is
-        # what Chromium requires to accept a tunneled DevTools connection.
-        proxy_server, proxy_port = make_devtools_proxy("127.0.0.1", t.local_port)
-        inspector = build_inspector_url(t.local_port, proxy_port, targets)
+        inspector = build_inspector_url(t.base, targets)
         if not inspector:
-            try:
-                proxy_server.shutdown(); proxy_server.server_close()
-            except Exception:  # noqa: BLE001
-                pass
             tunnels.close(t.id)
-            raise HTTPException(status_code=502, detail="No Matrix App page/target with a debugger URL was found.")
-        tunnels.attach_proxy(t.id, proxy_server, inspector)
+            raise HTTPException(status_code=502, detail=f"No {app_name} page/target with a debugger URL was found.")
+        tunnels.set_url(t.id, inspector)
         return {
-            "url": inspector, "tunnel_id": t.id, "local_port": proxy_port,
-            "title": title, "room_number": room.number,
+            "url": inspector, "tunnel_id": t.id, "local_port": t.local_port,
+            "title": title, "room_number": room.number, "repaired": repaired,
         }
 
     @app.post("/api/matrix-app/screenshot")
     def matrix_app_screenshot(req: MatrixAppInspectRequest) -> Dict[str, Any]:
         """Capture a PNG of the room's Matrix App via Chrome DevTools
         (``Page.captureScreenshot``) over a short-lived tunnel and save it as
-        a downloadable artifact. Needs remote debugging enabled."""
-        import requests
-
+        a downloadable artifact. Needs DevTools enabled. The screen is woken
+        (and the admin app brought on screen) first, since a sleeping or
+        hidden window doesn't render."""
+        require_qa()
         room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password)
-        port = app_config.connection.matrix_app_debug_port
+        _, app_name = _debug_target(req.app)
+        t, targets, _ = _open_devtools_tunnel(room, req, f"{app_name} screenshot OR {room.number}", settle=1)
         try:
-            t = tunnels.open_port(app_config, creds, room, port, f"Matrix App screenshot OR {room.number}")
-        except SSHError as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
+            png = capture_cdp_screenshot(targets)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(status_code=502, detail=f"Failed to open tunnel: {exc}")
-        try:
-            try:
-                resp = requests.get(f"http://127.0.0.1:{t.local_port}/json/list", timeout=6)
-                resp.raise_for_status()
-                targets = resp.json()
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Matrix App DevTools not reachable on port {port} - click Enable Remote "
-                           f"Debugging first. ({exc})",
-                )
-            try:
-                png = capture_cdp_screenshot(t.local_port, targets)
-            except Exception as exc:  # noqa: BLE001
-                raise HTTPException(status_code=502, detail=f"Screenshot failed: {exc}")
+            raise HTTPException(status_code=502, detail=f"Screenshot failed: {exc}")
         finally:
             tunnels.close(t.id)
 
         ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-        name = f"or{room.number}-matrix-app-{time.strftime('%Y%m%d-%H%M%S')}.png"
+        slug = "matrix-admin-app" if req.app == "admin" else "matrix-app"
+        name = f"or{room.number}-{slug}-{time.strftime('%Y%m%d-%H%M%S')}.png"
         (ARTIFACTS_DIR / name).write_bytes(png)
         return {"room_number": room.number, "name": name, "url": f"/api/artifacts/{name}"}
 
@@ -1400,13 +1999,38 @@ def create_app(config: Optional[AppConfig] = None) -> FastAPI:
         response = await call_next(request)
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-cache"
+        else:
+            # API replies can carry saved passwords; keep them out of any cache.
+            response.headers["Cache-Control"] = "no-store"
+        response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
         return response
 
     @app.get("/")
-    def index() -> FileResponse:
+    def index(request: Request, t: Optional[str] = None):
+        cookie = session_cookie_name(request.headers.get("host", ""))
+        if api_token and t is not None:
+            # Sign-in link from run_server.py: swap it for a session cookie
+            # and drop the token from the address.
+            if not hmac.compare_digest(t.encode(), api_token.encode()):
+                return HTMLResponse(_SIGN_IN_PAGE, status_code=401)
+            # Not a 303: the sign-in link is opened from the file:// splash, and
+            # Chrome doesn't send a SameSite=Strict cookie on a redirect that is
+            # part of a cross-site navigation, so "/" would come back signed out.
+            # This same-origin page moves on by itself (meta refresh: the CSP
+            # blocks inline scripts), and that navigation carries the cookie.
+            response = HTMLResponse(_SIGNED_IN_PAGE)
+            response.set_cookie(cookie, api_token, httponly=True, samesite="strict", path="/")
+            return response
+        if api_token and not hmac.compare_digest(request.cookies.get(cookie, ""), api_token):
+            return HTMLResponse(_SIGN_IN_PAGE, status_code=401)
         return FileResponse(STATIC_DIR / "index.html")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    # Outermost, so it also covers WebSockets and error responses.
+    app.add_middleware(LocalOnlyGuard, api_token=api_token)
     return app
 
 
