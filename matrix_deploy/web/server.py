@@ -210,12 +210,15 @@ _SIGN_IN_PAGE = (
 )
 
 
-_SIGNED_IN_PAGE = (
-    "<!DOCTYPE html><html><head><meta charset='utf-8'><meta http-equiv='refresh' content='0;url=/'>"
-    "<title>Matrix Facility Manager</title></head>"
-    "<body style='font-family:sans-serif;max-width:36em;margin:4em auto'><p>Signing in&hellip; "
-    "<a href='/'>Continue</a></p></body></html>"
-)
+def _signed_in_page() -> str:
+    """The loading screen (splash.html) without its script, moving on to "/"
+    by meta refresh, so signing in looks like the app is still starting."""
+    html = (STATIC_DIR / "splash.html").read_text(encoding="utf-8")
+    html = re.sub(r"(?s)<script>.*?</script>", "", html)
+    return html.replace("<head>", "<head>\n<meta http-equiv=\"refresh\" content=\"0;url=/\" />", 1)
+
+
+_SIGNED_IN_PAGE = _signed_in_page()
 
 
 def session_cookie_name(host: str) -> str:
