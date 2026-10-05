@@ -60,6 +60,17 @@ query MatrixDeployLabDiagnostics {
 }
 """
 
+# Fiber Test: the device end of every fiber link (each NMS device's SFP light
+# levels and receive errors per network port). Matched to switch ports by MAC.
+SFP_QUERY = """
+query MatrixDeployFiber {
+  devicesDiagnosticsV2 {
+    deviceId
+    networkInterfaces { name rxPower txPower rxErrors sfpVendor sfpTemperature ipAddress macAddress alerts { code category } }
+  }
+}
+"""
+
 
 class NmsError(Exception):
     pass
@@ -236,6 +247,84 @@ def _device_summary(d: Dict[str, Any], diag: Optional[Dict[str, Any]] = None) ->
     }
 
 
+def collect_room_sfp(config: AppConfig, creds: DeploymentCredentials, room: Room) -> Dict[str, Any]:
+    """Fiber Test, read-only: each NMS device's SFP readings for one room
+    (``devices: [{id, interfaces: [{name, ip, mac, rx, tx, rx_errors, vendor,
+    temp, alerts}]}]``). Reuses the NMS password/token cached by the Facility
+    check; reads the password over SSH (sudo) only when it isn't cached."""
+    base = nms_base_url(config, room)
+    out: Dict[str, Any] = {"number": room.number, "devices": []}
+    if room.secondary:
+        out["error"] = "Secondary room - no local NMS"
+        return out
+    password = _NMS_PASSWORDS.get(base)
+    try:
+        if not password:
+            if not creds.sudo_password:
+                out["error"] = "Needs the sudo password (to read the NMS login)"
+                return out
+            errors: List[str] = []
+            deployer = Deployer(config, creds, log=lambda m, lvl: errors.append(m) if lvl == "error" else None,
+                                progress=lambda s, t: None, is_cancelled=lambda: False)
+            password = deployer.fetch_nms_password(room)
+            if not password:
+                # e.g. "Can't SSH in: ..." when the room is off or its host key changed.
+                out["error"] = errors[0] if errors else "Couldn't read the NMS password (act-mfg-eeprom)"
+                return out
+        http = tls_pins.pinned_session(base, NMS_TIMEOUT)
+        token = _NMS_TOKENS.get(base)
+        for fresh in ((False, True) if token else (True,)):
+            if fresh:
+                token = _nms_login(config, base, password, http)
+                _NMS_TOKENS[base] = token
+            try:
+                data = _nms_query(config, base, token, SFP_QUERY, http)
+                break
+            except NmsError:
+                if fresh:
+                    raise
+        _NMS_PASSWORDS[base] = password
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = _nms_error(exc, base)
+        return out
+    for d in data.get("devicesDiagnosticsV2") or []:
+        out["devices"].append({"id": str(d.get("deviceId") or ""), "interfaces": [
+            {"name": str(i.get("name") or ""), "ip": str(i.get("ipAddress") or ""), "mac": str(i.get("macAddress")).lower(),
+             "rx": _number(i.get("rxPower")), "tx": _number(i.get("txPower")), "rx_errors": _number(i.get("rxErrors")),
+             "vendor": str(i.get("sfpVendor") or ""), "temp": _number(i.get("sfpTemperature")),
+             "alerts": [_alert_text(a.get("code")) for a in i.get("alerts") or []]}
+            for i in d.get("networkInterfaces") or [] if i.get("macAddress")
+        ]})
+    return out
+
+
+def _number(v: Any) -> Optional[float]:
+    """NMS readings as numbers (or None), whatever type the NMS sends."""
+    try:
+        return None if v is None or isinstance(v, bool) else float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _nms_error(exc: Exception, base: str) -> str:
+    """A readable NMS error. A changed certificate must stay visible as such
+    (requests reports it as an SSLError, a kind of ConnectionError). A
+    rejected login drops the cached password/token so the next check re-reads it."""
+    if isinstance(exc, NmsLoginError):
+        _NMS_PASSWORDS.pop(base, None)
+        _NMS_TOKENS.pop(base, None)
+    if isinstance(exc, requests.exceptions.SSLError):
+        return tls_pins.describe_error(exc, base)
+    if isinstance(exc, requests.ConnectionError):
+        host, _, port = base.split("//", 1)[-1].partition(":")
+        reachable = port.isdigit() and port_is_open(host, int(port))
+        return (f"NMS not answering at {base}" if reachable
+                else f"NMS port {port or 443} isn't reachable through the router (see Router Ports)")
+    if isinstance(exc, requests.Timeout):
+        return f"NMS timed out at {base}"
+    return str(exc)
+
+
 def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: Room) -> Dict[str, Any]:
     """Read-only health snapshot for one room. Never raises; problems are
     reported in ``issues`` and reflected in ``state``
@@ -330,19 +419,7 @@ def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: R
             status["devices"] = [_device_summary({**d, **net.get(d.get("id"), {})}, by_id.get(d.get("id")))
                                  for d in data.get("devices") or []]
         except Exception as exc:  # noqa: BLE001
-            if isinstance(exc, NmsLoginError):
-                _NMS_PASSWORDS.pop(base, None)
-                _NMS_TOKENS.pop(base, None)
-            msg = str(exc)
-            if isinstance(exc, requests.exceptions.SSLError):
-                msg = tls_pins.describe_error(exc, base)
-            elif isinstance(exc, requests.ConnectionError):
-                host, _, port = base.split("//", 1)[-1].partition(":")
-                reachable = port.isdigit() and port_is_open(host, int(port))
-                msg = (f"NMS not answering at {base}" if reachable
-                       else f"NMS port {port or 443} isn't reachable through the router (see Router Ports)")
-            elif isinstance(exc, requests.Timeout):
-                msg = f"NMS timed out at {base}"
+            msg = _nms_error(exc, base)
             status["nms"]["error"] = msg
             issues.append(msg)
 

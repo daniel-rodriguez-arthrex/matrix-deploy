@@ -65,6 +65,7 @@
       <nav class="tabs" id="tabs">
         <button class="tab active" data-tab="lab-status">Facility</button>
         <button class="tab" data-tab="router-ports">Network</button>
+        <button class="tab" data-tab="fiber">Fiber Test</button>
         <button class="tab" data-tab="logs">Logs</button>
         <button class="tab" data-tab="actions">Actions</button>
         <button class="tab" data-tab="tunnels" data-team="qa">Tunnels</button>
@@ -83,7 +84,7 @@
     <div class="work">
       <!-- Shown when the local server stops answering (console window closed) -->
       <div class="setup-banner error server-banner" id="server-banner" hidden>
-        <span class="setup-banner-text"><strong>Matrix Facility Manager has stopped</strong>, so nothing on this page will work. Start <code>MatrixDeploy.exe</code> again &mdash; this page reconnects by itself once it's back (or use the new window that opens and close this one).</span>
+        <span class="setup-banner-text"><strong>Matrix Facility Manager has stopped</strong>, so nothing on this page will work. Start <code>MatrixDeploy.exe</code> again - this page reconnects by itself once it's back (or use the new window that opens and close this one).</span>
       </div>
 
       <!-- Setup Check banner (shown only when something needs attention) -->
@@ -154,7 +155,7 @@
       <section class="tab-panel active" data-panel="lab-status">
         <div class="card accent">
           <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 6 4-14 2 8h6"/></svg> Facility Status</h2><span class="badge subtle" id="ls-updated">not checked yet</span></div>
-          <p class="hint">Health of each room: Matrix API and Barco NMS services, the installed software build, the encoders, decoders and displays NMS sees, and whether the NMS license is active. Each card also lists what changed since the previous check. Read-only &mdash; nothing on the rooms is changed. Every room is checked automatically when the app opens or you switch site, if the SSH password is filled in. Uses the SSH and sudo passwords from the sidebar (sudo is needed to read each room's NMS login).</p>
+          <p class="hint">Health of each room: Matrix API and Barco NMS services, the installed software build, the encoders, decoders and displays NMS sees, and whether the NMS license is active. Each card also lists what changed since the previous check. Read-only - nothing on the rooms is changed. Every room is checked automatically when the app opens or you switch site, if the SSH password is filled in. Uses the SSH and sudo passwords from the sidebar (sudo is needed to read each room's NMS login).</p>
           <div class="panel-section action-grid ls-actions">
             <button class="primary" id="ls-check-all"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"/></svg> Check All Rooms</button>
             <button class="action" id="ls-check-selected"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg> Check Selected Rooms</button>
@@ -554,6 +555,46 @@
         </details>
       </section>
 
+      <!-- FIBER TEST TAB (SFP light levels + port error counters, read-only) -->
+      <section class="tab-panel" data-panel="fiber">
+        <div class="card accent">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg> Fiber Test</h2><span class="badge subtle" id="fiber-updated">not tested yet</span></div>
+          <p class="hint">Checks both ends of every fiber link: the light each switch SFP and each encoder/decoder SFP receives and sends, the loss in each direction, SFP health, and the error counters on both ends. Test again after cleaning or replugging a fiber to see the light change and whether errors are still going up. Read-only - nothing on the switches or rooms is changed and the counters aren't cleared. Uses the router and switch passwords saved for the lab, and the SSH and sudo passwords from the sidebar for each room's NMS.</p>
+          <div class="panel-section action-grid ls-actions">
+            <button class="primary" id="fiber-check"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3-6.7M21 3v5h-5"/></svg> Test Fiber</button>
+            <span class="ls-export">
+              <button class="action" id="fiber-export" disabled title="Download the test as an Excel workbook: a summary, one sheet per switch and all links in one table"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> Export Excel</button>
+            </span>
+            <span class="config-status" id="fiber-progress"></span>
+          </div>
+          <div class="panel-section ls-summary-section">
+            <div class="ls-summary" id="fiber-summary"></div>
+            <div id="fiber-notes"></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h.01M10 11h.01M14 11h.01M18 11h.01M6 14h12"/></svg> Switches</h2><span class="badge subtle" id="fiber-badge"></span>
+            <span class="net-head-actions">
+              <span class="segmented sm-seg" id="fiber-view" hidden>
+                <button class="seg active" data-view="switch">By switch</button>
+                <button class="seg" data-view="room">By room</button>
+              </span>
+            </span>
+          </div>
+          <p class="hint">Each switch's ports coloured by the test result; problems and warnings are listed under each switch. <b>Click a port</b> for both ends of its link (switch and device light, loss each way, errors), or open <b>Modules</b> for the full list. <b>By room</b> lists every encoder/decoder fiber port with its switch port, the light at both ends and the loss.</p>
+          <div class="panel-section">
+            <div id="fiber-switches"></div>
+            <div class="net-legend" id="fiber-legend" hidden>
+              <span><span class="port fib ok mini"></span> fiber OK</span><span><span class="port fib warn mini"></span> warning</span>
+              <span><span class="port fib bad mini"></span> problem</span><span><span class="port fib copper mini"></span> copper / DAC</span>
+              <span><span class="port fib idle mini"></span> unused SFP</span><span><span class="port free mini"></span> no module</span>
+              <span class="legend-hint">A light bar under the number = link up.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <!-- SETTINGS TAB -->
       <section class="tab-panel" data-panel="settings">
         <div class="card" id="preflight-card">
@@ -738,7 +779,7 @@
       <h3 id="creds-modal-title"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg><span>Set up <span id="creds-site">this lab</span></span></h3>
       <button class="modal-close" id="creds-modal-close" aria-label="Close">&times;</button>
     </div>
-    <p class="hint">Enter these once &mdash; they're saved on this computer and filled in automatically next time. Leave a field blank to keep what's already saved.</p>
+    <p class="hint">Enter these once - they're saved on this computer and filled in automatically next time. Leave a field blank to keep what's already saved.</p>
     <div class="modal-body">
       <section class="creds-section">
         <div class="creds-section-head"><span class="subgroup-label">Lab login</span><span class="badge subtle">this lab</span></div>

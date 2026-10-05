@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -37,6 +39,18 @@ DEFAULT_PORT = 8420
 FROZEN = getattr(sys, "frozen", False)
 # Quit this long after the last window closed (covers a page reload).
 IDLE_EXIT_AFTER = 10
+
+
+class _HideSignInToken(logging.Filter):
+    """The request log would print the sign-in link (``GET /?t=<token>``) to
+    the console; blank the token. Only the access log is touched."""
+
+    _TOKEN = re.compile(r"([?&]t=)[^&\s]+")
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.args, tuple):
+            record.args = tuple(self._TOKEN.sub(r"\1<hidden>", a) if isinstance(a, str) else a for a in record.args)
+        return True
 
 
 def _fail(text: str) -> None:
@@ -191,6 +205,7 @@ def main() -> None:
     print(f"Matrix Facility Manager - Setup Check\n{format_report(run_preflight(config, network=False))}")
     app = create_app(config, api_token=token)
     server = uvicorn.Server(uvicorn.Config(app, host=HOST, port=port, log_level="warning" if FROZEN else "info"))
+    logging.getLogger("uvicorn.access").addFilter(_HideSignInToken())  # after Config() set up uvicorn's loggers
 
     if auto_exit:
         def watchdog() -> None:

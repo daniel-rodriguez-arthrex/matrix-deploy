@@ -96,6 +96,7 @@ document.querySelectorAll("#tabs .tab").forEach((tab) => {
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     tab.classList.add("active");
     document.querySelector(`.tab-panel[data-panel="${tab.dataset.tab}"]`).classList.add("active");
+    closePortPanel();  // shared by the Network and Fiber Test tabs
   });
 });
 
@@ -104,6 +105,14 @@ function escapeHtml(s) {
   // Quotes too: results are also used inside title="..." attributes.
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+// One CSV cell. Text from rooms/NMS (device names...) that starts like a
+// formula (= + - @) gets a leading ' so Excel shows it instead of running it.
+// Numbers (e.g. -2.5 dBm) are left alone.
+function csvCell(v) {
+  let s = String(v ?? "");
+  if (/^[=+\-@\t\r]./.test(s) && (typeof v !== "number" && Number.isNaN(Number(s)))) s = `'${s}`;
+  return `"${s.replace(/"/g, '""')}"`;
 }
 // Only http(s) or same-site links are ever rendered (no javascript: / data: URLs).
 const safeUrl = (url) => (/^(https?:\/\/|\/(?!\/))/i.test(String(url)) ? String(url) : "#");
@@ -219,7 +228,7 @@ el("copy-console").addEventListener("click", async () => {
   const text = (t.panel.innerText || "").trim();
   if (!text) { logLine("Nothing to copy.", "warning"); return; }
   const ok = await copyToClipboard(text);
-  logLine(ok ? "Console copied to clipboard." : "Copy failed \u2014 select the text manually.", ok ? "info" : "warning");
+  logLine(ok ? "Console copied to clipboard." : "Copy failed - select the text manually.", ok ? "info" : "warning");
 });
 
 /* ---------- Console resize + expand ---------- */
@@ -423,16 +432,16 @@ function renderRouterBox(data, cols) {
       if (live === "ok") ok++;
       const target = `${data.router_ip}:${f.outside_port} \u2192 ${r.room_id}:${f.inside_port}`;
       const c = conflicts[String(f.outside_port)];
-      if (live === "missing") problems.push(`OR ${r.number} ${label}: port ${f.outside_port} isn't forwarded \u2014 ${NAT_IMPACT[k]}.`);
+      if (live === "missing") problems.push(`OR ${r.number} ${label}: port ${f.outside_port} isn't forwarded - ${NAT_IMPACT[k]}.`);
       if (live === "conflict") problems.push(`OR ${r.number} ${label}: port ${f.outside_port} goes to ${c ? `${c.inside_ip}:${c.inside_port}${c.label ? ` (${c.label})` : ""}` : "something else"} instead of ${r.room_id}:${f.inside_port}.`);
-      const tip = `OR ${r.number} ${label}: ${target}${live ? ` \u2014 ${LIVE_LABEL[live]}` : " \u2014 not checked yet"}`;
+      const tip = `OR ${r.number} ${label}: ${target}${live ? ` - ${LIVE_LABEL[live]}` : " - not checked yet"}`;
       return `<span class="port fwd ${live || "unchecked"} ${f.source}" title="${escapeHtml(tip)}">${r.number}</span>`;
     }).join("");
     return `<div class="fwd-row"><span class="fwd-label"><b>${label}</b> <span class="vlan-meta">:${port} \u00b7 ${range}</span>` +
       `${source ? `<span class="fwd-src ${source.source}">${source.source === "qa" ? "QA test" : "facility"}</span>` : ""}</span>${cells}</div>`;
   });
   let summary;
-  if (!routerLive) summary = `<span class="legend-hint">${total} planned forwards \u00b7 not compared with the live router yet \u2014 click <b>Check live router</b>.</span>`;
+  if (!routerLive) summary = `<span class="legend-hint">${total} planned forwards \u00b7 not compared with the live router yet - click <b>Check live router</b>.</span>`;
   else {
     const other = routerLive.other.length;
     summary = `<span>${ok} of ${total} forwards OK</span>` +
@@ -472,7 +481,7 @@ function renderRouterPorts() {
         if (!f) return "<td></td>";
         const live = st[String(f.outside_port)];
         const tip = `${data.router_ip}:${f.outside_port} \u2192 ${r.room_id}:${f.inside_port}` +
-          (f.source === "qa" ? " (QA test access)" : " (facility)") + (live ? ` \u2014 ${LIVE_LABEL[live]}` : "");
+          (f.source === "qa" ? " (QA test access)" : " (facility)") + (live ? ` - ${LIVE_LABEL[live]}` : "");
         return `<td><span class="port-chip ${f.source}${live ? " " + live : ""}" title="${escapeHtml(tip)}">${f.outside_port}</span></td>`;
       }).join("")}
     </tr>`).join("");
@@ -533,7 +542,7 @@ function renderNatPicker(data, cols) {
       const live = st[String(f.outside_port)];
       const on = nat.sel.has(natKey(r.number, k));
       const tip = `OR ${r.number} ${label}: ${data.router_ip}:${f.outside_port} \u2192 ${r.room_id}:${f.inside_port}` +
-        `${live ? ` \u2014 ${LIVE_LABEL[live]}` : ""}\nClick to ${on ? "leave it out" : "add it"}`;
+        `${live ? ` - ${LIVE_LABEL[live]}` : ""}\nClick to ${on ? "leave it out" : "add it"}`;
       return `<button type="button" class="port fwd pick ${on ? "on" : "off"}${live && live !== "ok" ? ` live-${live}` : ""}" ` +
         `data-nat="${natKey(r.number, k)}" title="${escapeHtml(tip)}">${r.number}</button>`;
     }).join("");
@@ -582,7 +591,7 @@ const ROOM_HUES = ["#f59e0b", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#3b82
 let switchLive = null;       // last /api/switches/live response for this site
 let switchView = "switch";   // "switch" | "room"
 let netModel = null;         // last buildNetwork() result (used by the port panel)
-const KIND_LABEL = { ENCODER: "Encoder", DECODER: "Decoder", PC: "PC", EXTRON: "Extron", ROUTER: "Router", OTHER: "Device" };
+const KIND_LABEL = { ENCODER: "Encoder", DECODER: "Decoder", PC: "PC", EXTRON: "Extron", ROUTER: "Router", SWITCH: "Switch", OTHER: "Device" };
 
 function ipToInt(ip) { return ip.split(".").reduce((a, o) => (a << 8) + Number(o), 0) >>> 0; }
 function ipInNet(ip, net, prefix) {
@@ -676,7 +685,7 @@ function buildNetwork(fac) {
     e.room = l0 ? l0.vlan.room : (e.nms ? e.nms.room : null);
     for (const l of e.links) {
       if (l.vlan && l.vlan.kind === "room" && l.ip && !ipInNet(l.ip, l.vlan.ip, l.vlan.prefix)) {
-        problem(e, l, `IP ${l.ip} doesn't belong to ${vlanTitle(l.vlan)} (${l.vlan.ip}/${l.vlan.prefix}) \u2014 plugged into the wrong room's port?`);
+        problem(e, l, `IP ${l.ip} doesn't belong to ${vlanTitle(l.vlan)} (${l.vlan.ip}/${l.vlan.prefix}) - plugged into the wrong room's port?`);
       }
       if (e.nms && l.speed && !/G$/.test(l.speed)) problem(e, l, `Port ${l.port} is running at ${speedText(l.speed)} (expected 10G)`);
     }
@@ -693,7 +702,7 @@ function buildNetwork(fac) {
     entities[`nms:${dev.id}`] = {
       key: `nms:${dev.id}`, ...nmsNames(dev), kind: dev.kind, serial: dev.serial,
       nms: dev, room: dev.room, links: [], missing: true, notes: [],
-      issues: ["Not seen on any switch port \u2014 unplugged, powered off or link down?"],
+      issues: ["Not seen on any switch port - unplugged, powered off or link down?"],
     };
   }
   // Planned devices (each room's PC from the lab profile, Extrons from the
@@ -713,8 +722,8 @@ function buildNetwork(fac) {
       // A missing room PC is a real problem (the room can't work without it).
       // An Extron is optional and the planner's list can be stale, so it's a note.
       const msg = p.kind === "PC"
-        ? `Planned at ${p.ip} but not seen on any switch port \u2014 unplugged, powered off or idle?`
-        : `Planned at ${p.ip} but not seen on any switch port \u2014 not installed, unplugged or powered off? (Check the planner if this room has no Extron.)`;
+        ? `Planned at ${p.ip} but not seen on any switch port - unplugged, powered off or idle?`
+        : `Planned at ${p.ip} but not seen on any switch port - not installed, unplugged or powered off? (Check the planner if this room has no Extron.)`;
       entities[`exp:${p.ip}`] = {
         key: `exp:${p.ip}`, name: p.name, kind: p.kind, meta: p.ip, room: home.v.room, links: [], missing: true,
         issues: p.kind === "PC" ? [msg] : [], notes: p.kind === "PC" ? [] : [msg],
@@ -741,7 +750,7 @@ function expectedRow(m, room) {
 }
 
 function portsText(e, withSwitch = false) {
-  if (!e.links.length) return "\u2014";
+  if (!e.links.length) return "-";
   const by = {};
   for (const l of e.links) (by[l.S.sw.name] = by[l.S.sw.name] || []).push(l.port);
   return Object.entries(by).map(([sw, ps]) => `${withSwitch ? `${sw.replace(/^.*-/, "")} ` : ""}${[...new Set(ps)].sort((a, b) => a - b).join(" + ")}`).join(", ");
@@ -799,7 +808,7 @@ function renderSwitchView(m) {
       let cls = `port ${v ? v.kind : "free"}`;
       if (lp) cls += st && st.link ? " up" : " down";
       if (S.portIssues[n]) cls += " issue";
-      const tip = `Port ${n}: ${v ? vlanTitle(v) : "not assigned"}${lp ? (st && st.link ? ` \u00b7 link up ${speedText(st.speed)}` : " \u00b7 no link") : ""} \u2014 click for details`;
+      const tip = `Port ${n}: ${v ? vlanTitle(v) : "not assigned"}${lp ? (st && st.link ? ` \u00b7 link up ${speedText(st.speed)}` : " \u00b7 no link") : ""} - click for details`;
       return `<button type="button" class="${cls}"${style} data-sw="${S.idx}" data-port="${n}" title="${escapeHtml(tip)}">${n}</button>`;
     };
     const front = Array.from({ length: 48 }, (_, i) => i + 1);
@@ -809,7 +818,7 @@ function renderSwitchView(m) {
     const issueCount = S.issues.length + mine.reduce((a, e) => a + e.issues.length, 0);
     let summary;
     if (S.live && S.live.error) summary = `<span class="issue-text">Couldn't read this switch: ${escapeHtml(S.live.error)}</span>`;
-    else if (!lp) summary = `<span class="legend-hint">Not checked yet \u2014 click <b>Check switches</b>.</span>`;
+    else if (!lp) summary = `<span class="legend-hint">Not checked yet - click <b>Check switches</b>.</span>`;
     else {
       const parts = vlans.filter((v) => v.kind === "room").map((v) => {
         const n = mine.filter((e) => e.room === v.room && !e.missing).length;
@@ -940,6 +949,8 @@ document.querySelectorAll("#switch-view .seg").forEach((b) => b.addEventListener
 async function checkSwitches({ quiet = false } = {}) {
   const btn = el("switches-check");
   if (btn.disabled || btn.hidden) return;
+  // The Fiber Test is already logged in to every switch and fills switchLive when it's done.
+  if (fiberBusy) { el("switches-status").textContent = "The Fiber Test is reading the switches\u2026"; return; }
   const done = setBusy(btn, "Reading switches\u2026");
   try {
     const res = await fetch("/api/switches/live", { method: "POST" });
@@ -965,10 +976,16 @@ async function loadRouterPorts() {
   routerPorts = await (await fetch("/api/router-ports")).json();
   routerLive = null;
   switchLive = null;
+  fiberLive = fiberPrev = null;
+  fiberNms = {};
+  fiberRun++;
   Object.assign(nat, { sel: new Set(), touched: false, edited: false });
   el("router-live-status").textContent = "";
   el("switches-status").textContent = "";
+  el("fiber-updated").textContent = "not tested yet";
+  el("fiber-progress").textContent = "";
   renderRouterPorts();
+  renderFiber();
 }
 async function checkLiveRouter({ quiet = false } = {}) {
   const btn = el("router-live-check");
@@ -1002,16 +1019,829 @@ el("router-live-check").addEventListener("click", () => checkLiveRouter());
 // when a router login is saved.
 document.querySelector('#tabs .tab[data-tab="router-ports"]').addEventListener("click", () => {
   // Router first: the switch check reuses its NAT rules to find each switch.
-  if (!routerLive && el("router-admin-password").value) {
+  if (!routerLive && hasCred("router-admin-password", "router_admin_password")) {
     checkLiveRouter({ quiet: true }).then(() => { if (routerLive && !switchLive) checkSwitches({ quiet: true }); });
   }
 });
 el("router-ports-refresh").addEventListener("click", () => {
   loadRouterPorts().catch((e) => logLine(`Failed to load router ports: ${e}`, "error"));
 });
+
+/* ---------- Fiber Test: both ends of every fiber link ---------- */
+// Switch end: the Network tab's switch read plus the optics/error commands.
+// Device end: each room's NMS (SFP light + receive errors per device port),
+// matched to switch ports by MAC, so each link gets its loss in both
+// directions (device Tx - switch Rx, switch Tx - device Rx), like the lab's
+// mg2diagnostics --fiber-test. All read-only. The previous test is kept in
+// this browser (per site, no secrets), so a re-test shows how the light
+// changed and whether errors are still going up.
+let fiberLive = null;        // last /api/switches/live {fiber: true} response
+let fiberNms = {};           // last /api/fiber/room response per room number
+let fiberPrev = null;        // the test before it: { at, ports: {"<switch>|<port>" | "dev|<id>|<port>": {rx, err}} }
+let fiberRows = [];          // last rendered switch-port rows (Export CSV)
+let fiberLinks = [];         // last rendered device links (By room view)
+let fiberView = "switch";    // "switch" | "room"
+// One test at a time (each logs in to every switch and room); a site change
+// bumps fiberRun so a test still running for the old site is dropped.
+let fiberBusy = false;
+let fiberRun = 0;
+const fiberKey = () => `md-fiber-last:${el("site-select").value || "default"}`;
+// The lab's fiber limits (extreme_autov2.check_attenuation): Tx -4.5..-1.5 dBm,
+// Rx -5..-1.5 dBm. Below -22 dBm there's no light (link down), not a cabling reading.
+const FIBER_RANGE = { tx: [-4.5, -1.5], rx: [-5, -1.5], dark: -22 };
+const FIBER_MAX_LOSS = 3;  // dB, one direction of a link (sender's Tx - receiver's Rx)
+const outOfRange = (v, [lo, hi]) => v != null && v > FIBER_RANGE.dark && (v < lo || v > hi);
+const rangeText = ([lo, hi]) => `${lo} to ${hi} dBm`;
+// Error counters that point at the cable/optic. "Lost" (drops) is congestion, not the fiber.
+const FIBER_ERRORS = {
+  rx: { crc: "CRC", align: "alignment", frag: "fragment", jabber: "jabber", under: "undersize", over: "oversize" },
+  tx: { errors: "transmit", coll: "collision", late_coll: "late collision", parity: "parity" },
+};
+const FIBER_LEVEL = { ok: 0, idle: 0, warn: 1, bad: 2 };
+// Copper modules can report DDMI too (a 1000BASE-T SFP's temperature, a QSFP
+// direct-attach cable's vendor with "0 nm"), so judge by media type, not by
+// whether DDMI answered: 1000T / 10GT = copper SFP, CR / CR4 = direct-attach cable.
+const isCopper = (o) => /(^|[^A-Z])(\d+G?T|CR\d*|CU)(_|$)/i.test(o.media || "") || /^0\s*nm$/i.test(o.wavelength || "");
+const isOptical = (o) => !isCopper(o) && (o.ddmi || /[_+](SR|LR|ER|ZR|SX|LX|BX|ZX|FX)/i.test(o.media || ""));
+const dbm = (v) => (v == null ? "no light" : `${v > 0 ? "+" : ""}${v.toFixed(2)} dBm`);
+
+function fiberLoadPrev() {
+  try { return JSON.parse(localStorage.getItem(fiberKey())) || null; } catch { return null; }
+}
+function fiberSnapshot(d, nms) {
+  const ports = {};
+  for (const s of d.switches) {
+    for (const [n, p] of Object.entries(s.ports || {})) {
+      if (!p.optic || !p.optic.present) continue;
+      const rx = p.optic.ddm && p.optic.ddm.rx_power;
+      ports[`${s.name}|${n}`] = { rx: rx ? rx.value : null, err: p.errors || null };
+    }
+  }
+  for (const r of Object.values(nms)) {
+    for (const dev of r.devices || []) {
+      for (const i of dev.interfaces) if (i.rx != null || i.tx != null) ports[`dev|${dev.id}|${i.name}`] = { rx: i.rx, err: i.rx_errors };
+    }
+  }
+  return { at: d.checked_at, ports };
+}
+
+// What an out-of-range DDMI reading means, in plain words.
+function fiberDdmIssue(key, m) {
+  const high = /high/i.test(m.status), kind = /alarm/i.test(m.status) ? "alarm" : "warning";
+  const limit = high ? m[`high_${kind === "alarm" ? "alarm" : "warn"}`] : m[`low_${kind === "alarm" ? "alarm" : "warn"}`];
+  const lim = limit == null ? "" : `, ${kind} ${high ? "above" : "below"} ${limit}`;
+  switch (key) {
+    case "rx_power":
+      return high
+        ? `Receiving too much light (${dbm(m.value)}${lim}) - the receiver is overloaded. A long-reach optic on a short link? Use matching optics or add an attenuator.`
+        : `Weak light received (${dbm(m.value)}${lim}) - dirty connector, tight bend or damaged fiber. Clean both ends and test again.`;
+    case "tx_power":
+      return `Sending ${high ? "too much" : "too little"} light (${dbm(m.value)}${lim}) - this SFP's laser is failing; replace the module.`;
+    case "temp":
+      return `Module ${high ? "running hot" : "too cold"} (${m.value} \u00b0C${lim})${high ? " - check the switch's airflow and fans" : ""}.`;
+    case "tx_bias":
+      return `Laser bias current ${high ? "high" : "low"} (${m.value} mA${lim}) - the module is wearing out; plan to replace it.`;
+    default:
+      return `Supply voltage out of range (${m.value} V${lim}) - reseat the module.`;
+  }
+}
+
+// One port's verdict: level (ok / idle / warn / bad), problems, notes, Rx change.
+function fiberCheckPort(S, n, p, prev) {
+  const o = p.optic, ddm = o.ddm || {}, rx = ddm.rx_power, issues = [], notes = [];
+  let level = "ok";
+  const bump = (l) => { if (FIBER_LEVEL[l] > FIBER_LEVEL[level]) level = l; };
+  const v = S && S.owner[n];
+  const planned = v && (v.kind === "uplink" || v.kind === "backbone");
+  const dark = rx && (rx.value == null || /low alarm/i.test(rx.status));
+  if (!p.link) {
+    if (dark || !rx) {
+      if (planned) { issues.push(`${vlanTitle(v)} port has no ${rx ? "light and no " : ""}link - fiber unplugged or broken, or the far end is off`); bump("bad"); }
+      else { notes.push(rx ? "No light - nothing plugged in, or the far end is off/unplugged" : "No link"); level = "idle"; }
+    } else {
+      issues.push(`Light is arriving (${dbm(rx.value)}) but there's no link - the far end runs a different speed or optic type (e.g. 1G vs 10G, SR vs LR)?`);
+      bump("bad");
+    }
+  } else {
+    for (const key of ["rx_power", "tx_power", "temp", "tx_bias", "voltage"]) {
+      const m = ddm[key];
+      if (!m || !/alarm|warn/i.test(m.status)) continue;
+      issues.push(fiberDdmIssue(key, m));
+      bump(/alarm/i.test(m.status) ? "bad" : "warn");
+    }
+    // The lab's own (tighter) limits, when the module's limits didn't already flag it.
+    const tx = ddm.tx_power;
+    if (rx && !/alarm|warn/i.test(rx.status) && outOfRange(rx.value, FIBER_RANGE.rx)) {
+      issues.push(`Switch Rx ${dbm(rx.value)} is outside the lab's range (${rangeText(FIBER_RANGE.rx)}) - check the cabling: clean both connectors, reseat, and test again.`);
+      bump("warn");
+    }
+    if (tx && !/alarm|warn/i.test(tx.status) && outOfRange(tx.value, FIBER_RANGE.tx)) {
+      issues.push(`Switch Tx ${dbm(tx.value)} is outside the lab's range (${rangeText(FIBER_RANGE.tx)}) - bad switch SFP?`);
+      bump("warn");
+    }
+  }
+  // Errors: compare with the previous test when the counters didn't reset (switch reboot / clear).
+  const before = prev && prev.err;
+  for (const dir of ["rx", "tx"]) {
+    for (const [k, label] of Object.entries(FIBER_ERRORS[dir])) {
+      const c = p.errors && p.errors[dir] ? p.errors[dir][k] || 0 : 0;
+      const b = before && before[dir] ? before[dir][k] : null;
+      if (b != null && c > b) { issues.push(`${c - b} new ${label} error${c - b === 1 ? "" : "s"} since the last test - the link is corrupting traffic right now.`); bump("bad"); }
+      else if (b != null && c && c === b) notes.push(`${c} ${label} error${c === 1 ? "" : "s"} from before (not increasing)`);
+      else if (c) { issues.push(`${c} ${label} error${c === 1 ? "" : "s"} since the counters were last cleared - test again to see whether they're still going up.`); bump("warn"); }
+    }
+  }
+  const rxDelta = prev && prev.rx != null && rx && rx.value != null ? rx.value - prev.rx : null;
+  return { level, issues, notes, rxDelta };
+}
+
+function fiberErrorsText(p) {
+  if (!p.errors) return "-";
+  const parts = [];
+  for (const dir of ["rx", "tx"]) {
+    for (const [k, label] of Object.entries(FIBER_ERRORS[dir])) {
+      const c = p.errors[dir] && p.errors[dir][k];
+      if (c) parts.push(`${c} ${label}`);
+    }
+  }
+  return parts.join(", ") || "0";
+}
+
+// A DDMI reading as text, with the module's limits (port panel, table tooltips).
+const ddmCls = (m) => (/alarm/i.test(m.status) ? "issue-text" : /warn/i.test(m.status) ? "note-text" : "");
+function ddmLimits(m) {
+  if (m.low_alarm == null || m.high_alarm == null) return "";
+  return `warning below ${m.low_warn ?? m.low_alarm} or above ${m.high_warn ?? m.high_alarm}, alarm below ${m.low_alarm} or above ${m.high_alarm}`;
+}
+function rxChange(delta) {
+  return delta != null && Math.abs(delta) >= 1 ? `${delta > 0 ? "\u25b2" : "\u25bc"} ${Math.abs(delta).toFixed(1)} dB since the last test` : "";
+}
+function ddmCell(m, delta = null) {
+  if (!m) return '<span class="legend-hint">-</span>';
+  const change = rxChange(delta);
+  return `<span class="mono ${ddmCls(m)}" title="${escapeHtml(`${m.status}: ${ddmLimits(m)}`)}">${m.value == null ? "no light" : m.value.toFixed(2)}</span>` +
+    (change ? ` <span class="vlan-meta">${escapeHtml(change.replace(" since the last test", ""))}</span>` : "");
+}
+
+// What's on the other end of a port: LLDP neighbour, else the devices the
+// Network model names on it (NMS / lab profile), else its VLAN.
+function fiberFarEnd(S, n, p) {
+  if (p.neighbor) return { name: p.neighbor, kind: "SWITCH" };
+  const here = netModel ? netModel.entities.filter((e) => e.links.some((l) => l.S === S && l.port === n)) : [];
+  if (here.length) return { name: here.map((e) => e.name).join(", "), kind: here[0].kind };
+  const v = S && S.owner[n];
+  return { name: v ? vlanTitle(v) : "", kind: null, vlanOnly: true };
+}
+
+// The device end of one link: the lab's limits on its SFP, NMS alerts, receive errors.
+function fiberCheckDevice(L, prev) {
+  const issues = [], notes = [];
+  let level = "ok";
+  const bump = (l) => { if (FIBER_LEVEL[l] > FIBER_LEVEL[level]) level = l; };
+  if (outOfRange(L.devRx, FIBER_RANGE.rx)) {
+    issues.push(`Device Rx ${dbm(L.devRx)} on ${L.iface} is outside the lab's range (${rangeText(FIBER_RANGE.rx)}) - check the cabling: clean both connectors, reseat, and test again.`);
+    bump("warn");
+  }
+  if (outOfRange(L.devTx, FIBER_RANGE.tx)) {
+    issues.push(`Device Tx ${dbm(L.devTx)} on ${L.iface} is outside the lab's range (${rangeText(FIBER_RANGE.tx)}) - bad SFP in the device?`);
+    bump("warn");
+  }
+  // A short patch loses well under 3 dB; more in one direction = that strand of the pair.
+  for (const [loss, other, dir] of [[L.lossToSw, L.lossToDev, "device \u2192 switch"], [L.lossToDev, L.lossToSw, "switch \u2192 device"]]) {
+    if (loss == null || loss <= FIBER_MAX_LOSS) continue;
+    issues.push(`High loss ${dir}: ${loss.toFixed(1)} dB${other != null ? ` (the other direction ${other.toFixed(1)} dB)` : ""} - that strand of the fiber pair is dirty, bent or damaged.`);
+    bump("warn");
+  }
+  for (const a of L.alerts || []) { issues.push(`The device reports on ${L.iface}: ${a}`); bump("warn"); }
+  const c = L.rxErrors || 0, b = prev ? prev.err : null;
+  const errs = (x) => `${x} receive error${x === 1 ? "" : "s"}`;
+  if (b != null && c > b) { issues.push(`${errs(c - b)} on the device's ${L.iface} since the last test - the link is corrupting traffic right now.`); bump("bad"); }
+  else if (b != null && c && c === b) notes.push(`Device ${L.iface}: ${errs(c)} from before (not increasing)`);
+  else if (c) { issues.push(`Device ${L.iface}: ${errs(c)} since it started - test again to see whether they're still going up.`); bump("warn"); }
+  if (!L.r) notes.push("Switch end not found (no switch port has learned this MAC)");
+  const rxDelta = prev && prev.rx != null && L.devRx != null ? L.devRx - prev.rx : null;
+  return { level, issues, notes, rxDelta };
+}
+
+// Device links from each room's NMS, matched to the checked switch ports by MAC.
+// Device issues are added to their switch port's row too.
+function fiberBuildLinks(rowsBy) {
+  const at = {};
+  for (const s of (fiberLive && fiberLive.switches) || []) {
+    for (const [n, p] of Object.entries(s.ports || {})) for (const d of p.devices || []) at[d.mac] = (rowsBy[s.name] || {})[Number(n)];
+  }
+  const nms = nmsIndex();
+  const reading = (r, key) => (r && r.p.optic.ddm && r.p.optic.ddm[key] ? r.p.optic.ddm[key].value : null);
+  const links = [];
+  for (const [room, res] of Object.entries(fiberNms)) {
+    for (const dev of res.devices || []) {
+      for (const i of dev.interfaces) {
+        if (i.rx == null && i.tx == null) continue;  // port without an SFP (e.g. an unused nexxis1)
+        const r = at[i.mac] || null, hit = nms.byMac[i.mac];
+        const swRx = reading(r, "rx_power"), swTx = reading(r, "tx_power");
+        const L = {
+          room: Number(room), devId: dev.id, name: hit ? nmsNames(hit.dev).name : dev.id, kind: hit ? hit.dev.kind : "OTHER",
+          iface: i.name, ip: i.ip, mac: i.mac, devRx: i.rx, devTx: i.tx, rxErrors: i.rx_errors, alerts: i.alerts,
+          vendor: i.vendor, temp: i.temp, r, swRx, swTx,
+          lossToSw: i.tx != null && swRx != null ? i.tx - swRx : null,
+          lossToDev: swTx != null && i.rx != null ? swTx - i.rx : null,
+        };
+        Object.assign(L, fiberCheckDevice(L, fiberPrev && fiberPrev.ports[`dev|${dev.id}|${i.name}`]));
+        if (r) {
+          (r.links = r.links || []).push(L);
+          r.issues.push(...L.issues);
+          r.notes.push(...L.notes.filter((x) => !x.startsWith("Switch end")));
+          if (FIBER_LEVEL[L.level] > FIBER_LEVEL[r.level]) r.level = L.level;
+        }
+        links.push(L);
+      }
+    }
+  }
+  return links;
+}
+
+// Checked ports per switch, by port number ({S, rows: {n: row}}), from the last render (port panel).
+let fiberModel = [];
+
+const FIBER_ORDER = { bad: 0, warn: 1, ok: 2, idle: 3 };
+function fiberStatusCell(r) {
+  if (!r.issues.length && !r.notes.length) return '<span class="ok-text">OK</span>';
+  return [...r.issues.map((i) => `<span class="${r.level === "bad" ? "issue-text" : "note-text"}">${escapeHtml(i)}</span>`),
+    ...r.notes.map((i) => `<span class="legend-hint">${escapeHtml(i)}</span>`)].join("<br>");
+}
+function fiberFarCell(r) {
+  if (!r.far.name) return '<span class="legend-hint">-</span>';
+  return `${r.far.kind ? `${kindBadge(r.far.kind)} ` : ""}<span class="${r.far.vlanOnly ? "legend-hint" : ""}">${escapeHtml(r.far.name)}</span>`;
+}
+const dash = '<span class="legend-hint">-</span>';
+// A device-end reading: amber when outside the lab's range, change since the last test.
+function devCell(v, range, delta = null) {
+  if (v == null) return dash;
+  const change = rxChange(delta);
+  return `<span class="mono ${outOfRange(v, range) ? "note-text" : ""}" title="Lab range ${escapeHtml(rangeText(range))}">${v.toFixed(2)}</span>` +
+    (change ? ` <span class="vlan-meta">${escapeHtml(change.replace(" since the last test", ""))}</span>` : "");
+}
+const lossCell = (v) => (v == null ? dash : `<span class="mono">${v.toFixed(2)}</span>`);
+const FIBER_DB = ' <span class="th-sub">dBm</span>';
+const FIBER_HEAD = `<thead><tr><th>Port</th><th>Connected to</th><th>Speed</th><th>Switch Rx${FIBER_DB}</th><th>Device Rx${FIBER_DB}</th>` +
+  `<th>Loss to switch <span class="th-sub">dB</span></th><th>Loss to device <span class="th-sub">dB</span></th><th>Errors</th><th>Status</th></tr></thead>`;
+function fiberTableRows(list) {
+  return list.slice().sort((a, b) => FIBER_ORDER[a.level] - FIBER_ORDER[b.level] || a.n - b.n).map((r) => {
+    const ddm = r.p.optic.ddm || {}, L = (r.links || [])[0];
+    return `<tr class="${r.level === "bad" ? "has-issue" : ""}"><td class="mono">${r.n}</td><td class="fib-name">${fiberFarCell(r)}</td>` +
+      `<td>${r.p.link ? escapeHtml(speedText(r.p.speed)) : '<span class="legend-hint">no link</span>'}</td>` +
+      `<td>${ddmCell(ddm.rx_power, r.rxDelta)}</td><td>${L ? devCell(L.devRx, FIBER_RANGE.rx, L.rxDelta) : dash}</td>` +
+      `<td>${lossCell(L && L.lossToSw)}</td><td>${lossCell(L && L.lossToDev)}</td>` +
+      `<td class="mono">${escapeHtml(fiberErrorsText(r.p))}</td><td>${fiberStatusCell(r)}</td></tr>`;
+  }).join("");
+}
+
+// By room: every device port with an SFP, both ends side by side (the lab's --fiber-test view).
+const FIBER_ROOM_HEAD = `<thead><tr><th>Device</th><th>Port</th><th>Switch port</th><th>Switch Rx${FIBER_DB}</th><th>Device Rx${FIBER_DB}</th>` +
+  `<th>Loss to switch <span class="th-sub">dB</span></th><th>Loss to device <span class="th-sub">dB</span></th><th>Errors</th><th>Status</th></tr></thead>`;
+function renderFiberRooms(m) {
+  if (!fiberLive) return `<p class="legend-hint">Click <b>Test Fiber</b> to see each room's fiber links.</p>`;
+  const vlanOf = {};
+  for (const S of m.switches) for (const v of S.vlans) if (v.kind === "room") vlanOf[Number(v.room)] = { v, S };
+  return state.rooms.filter((rm) => fiberNms[rm.number]).sort((a, b) => a.number - b.number).map((rm) => {
+    const res = fiberNms[rm.number], home = vlanOf[rm.number];
+    const list = fiberLinks.filter((L) => L.room === rm.number);
+    const status = (L) => L.r || L;
+    const bad = list.filter((L) => status(L).level === "bad").length, warn = list.filter((L) => status(L).level === "warn").length;
+    const sum = res.error ? "" : [`${list.length} fiber link${list.length === 1 ? "" : "s"}`,
+      bad ? `<span class="sum-issues">${bad} problem${bad === 1 ? "" : "s"}</span>` : "",
+      warn ? `<span class="sum-notes">${warn} warning${warn === 1 ? "" : "s"}</span>` : "",
+      !bad && !warn ? '<span class="ok-text">No problems</span>' : ""].filter(Boolean).join(" \u00b7 ");
+    const rows = list.slice().sort((a, b) => FIBER_ORDER[status(a).level] - FIBER_ORDER[status(b).level] || a.name.localeCompare(b.name) || a.iface.localeCompare(b.iface)).map((L) => {
+      const st = status(L);
+      const swErr = L.r ? fiberErrorsText(L.r.p) : "0";
+      const errors = [swErr !== "0" && swErr !== "-" ? `switch ${swErr}` : "", L.rxErrors ? `device ${L.rxErrors}` : ""].filter(Boolean).join(" \u00b7 ") || "0";
+      return `<tr class="${st.level === "bad" ? "has-issue" : ""}"><td class="fib-name" title="${escapeHtml(L.devId)}">${kindBadge(L.kind)} ${escapeHtml(L.name)}</td>` +
+        `<td class="mono">${escapeHtml(L.iface)}</td><td class="mono">${L.r ? escapeHtml(`${L.r.sw.replace(/^.*-/, "")} ${L.r.n}`) : dash}</td>` +
+        `<td>${L.r ? ddmCell(L.r.p.optic.ddm && L.r.p.optic.ddm.rx_power, L.r.rxDelta) : dash}</td><td>${devCell(L.devRx, FIBER_RANGE.rx, L.rxDelta)}</td>` +
+        `<td>${lossCell(L.lossToSw)}</td><td>${lossCell(L.lossToDev)}</td><td class="mono">${escapeHtml(errors)}</td><td>${fiberStatusCell(st)}</td></tr>`;
+    }).join("");
+    const where = home ? `${home.S.sw.name} \u00b7 VLAN ${home.v.tag}` : "";
+    return `<div class="switch room-card">
+      <div class="switch-head">${home ? `<span class="swatch room" style="--port:${home.v.color}"></span>` : ""}<strong>${escapeHtml(roomName(rm))}</strong>` +
+      `<span class="vlan-meta">${escapeHtml(where)}</span><span class="room-card-sum">${sum}</span></div>
+      ${res.error ? `<p class="hint warn-text">Couldn't read the device end from OR ${rm.number}'s NMS: ${escapeHtml(res.error)}</p>` : ""}
+      ${rows ? `<div class="table-wrap"><table class="data-table net-table">${FIBER_ROOM_HEAD}<tbody>${rows}</tbody></table></div>` : res.error ? "" : '<p class="legend-hint">No fiber ports reported by this room\'s NMS.</p>'}
+    </div>`;
+  }).join("") || `<p class="legend-hint">No room NMS was read. Enter the SSH and sudo passwords in the sidebar (the NMS login is read from each room) and test again.</p>`;
+}
+
+// Switch view like the Network tab: front panel coloured by result, problems
+// listed under the summary, and the full module list folded away.
+function renderFiberSwitch(S, s, rows) {
+  const { sw, owner } = S;
+  const port = (n) => {
+    const r = rows[n];
+    const st = s && s.ports && s.ports[String(n)];
+    let cls = "port", tip = `Port ${n}: `;
+    if (!s || s.error) { cls += " free"; tip += "not tested"; }
+    else if (!r) { cls += " free"; tip += "no module"; }
+    else {
+      cls += ` fib ${r.level === "ok" && !r.optical ? "copper" : r.level}${st && st.link ? " up" : " down"}${r.level === "bad" ? " issue" : ""}`;
+      tip += `${r.p.optic.media || "module"} \u00b7 ${st && st.link ? `link up ${speedText(st.speed)}` : "no link"}${r.far.name ? ` \u00b7 ${r.far.name}` : ""}`;
+    }
+    return `<button type="button" class="${cls}" data-fsw="${S.idx}" data-port="${n}" title="${escapeHtml(`${tip} - click for details`)}">${n}</button>`;
+  };
+  const front = Array.from({ length: 48 }, (_, i) => i + 1);
+  const live = s && s.ports ? Object.keys(s.ports).map(Number).filter((n) => n > 48 && (s.ports[n].link || rows[n])) : [];
+  const extra = [...new Set([...Object.keys(owner).map(Number).filter((n) => n > 48), ...live])].sort((a, b) => a - b);
+  const list = Object.values(rows);
+  const fiber = list.filter((r) => r.optical);
+  const count = (l) => list.filter((r) => r.level === l).length;
+  let summary;
+  if (s && s.error) summary = `<span class="issue-text">Couldn't read this switch: ${escapeHtml(s.error)}</span>`;
+  else if (!s) summary = `<span class="legend-hint">Not tested yet - click <b>Test Fiber</b>.</span>`;
+  else {
+    const parts = [`<span>${fiber.length} fiber port${fiber.length === 1 ? "" : "s"} \u00b7 ${fiber.filter((r) => r.p.link).length} linked</span>`];
+    if (count("idle")) parts.push(`<span>${count("idle")} unused SFP${count("idle") === 1 ? "" : "s"}</span>`);
+    if (count("bad")) parts.push(`<span class="sum-issues">${count("bad")} problem${count("bad") === 1 ? "" : "s"}</span>`);
+    if (count("warn")) parts.push(`<span class="sum-notes">${count("warn")} warning${count("warn") === 1 ? "" : "s"}</span>`);
+    if (!count("bad") && !count("warn")) parts.push('<span class="ok-text">No problems</span>');
+    summary = parts.join("");
+  }
+  const where = (r) => `Port ${r.n}${r.far.name && !r.far.vlanOnly ? ` (${r.far.name})` : ""}`;
+  const issueList = (level) => list.filter((r) => r.level === level).sort((a, b) => a.n - b.n)
+    .flatMap((r) => r.issues.map((i) => `<li>${escapeHtml(`${where(r)}: ${i}`)}</li>`)).join("");
+  const bad = issueList("bad"), warn = issueList("warn");
+  const table = s && !s.error ? `<details class="net-other switch-devices">
+      <summary class="subgroup-label">Modules <span class="badge subtle">${list.length}</span></summary>
+      <div class="table-wrap"><table class="data-table net-table">${FIBER_HEAD}<tbody>${fiberTableRows(list) || '<tr><td colspan="9" class="legend-hint">No SFP modules in this switch.</td></tr>'}</tbody></table></div>
+    </details>` : "";
+  return `<div class="switch">
+    <div class="switch-head"><strong>${escapeHtml(sw.name || `Switch ${sw.number}`)}</strong><span class="vlan-meta">${escapeHtml(sw.model || "")}</span></div>
+    <div class="switch-summary">${summary}</div>
+    ${bad ? `<ul class="switch-issues">${bad}</ul>` : ""}
+    ${warn ? `<ul class="switch-issues notes">${warn}</ul>` : ""}
+    <div class="switch-body">
+      <div class="port-grid">
+        <div class="port-row">${front.filter((n) => n % 2).map(port).join("")}</div>
+        <div class="port-row">${front.filter((n) => !(n % 2)).map(port).join("")}</div>
+      </div>
+      ${extra.length ? `<div class="port-grid uplinks"><div class="port-row">${extra.map(port).join("")}</div><span class="vlan-meta">QSFP</span></div>` : ""}
+    </div>
+    ${table}
+  </div>`;
+}
+
+function renderFiber() {
+  const box = el("fiber-switches");
+  const fac = routerPorts && routerPorts.facility;
+  const have = !!(fac && fac.switches.length);
+  el("fiber-check").disabled = !have || fiberBusy;
+  el("fiber-legend").hidden = !have || fiberView === "room";
+  el("fiber-view").hidden = !have;
+  el("fiber-badge").textContent = have ? `${fac.site_code} \u00b7 version ${fac.version}` : "";
+  document.querySelectorAll("#fiber-view .seg").forEach((b) => b.classList.toggle("active", b.dataset.view === fiberView));
+  fiberModel = [];
+  fiberRows = [];
+  fiberLinks = [];
+  if (!have) {
+    el("fiber-summary").innerHTML = "";
+    el("fiber-export").disabled = true;
+    box.innerHTML = `<div class="empty-state"><span>No switch layout for this lab yet. Import its facility config to test the switches' fiber ports.</span>` +
+      `<button class="action sm" id="fiber-import">Import facility config</button></div>`;
+    el("fiber-import").addEventListener("click", () => { openSettingsTab(); el("facility-choose").click(); });
+    return;
+  }
+  const m = buildNetwork(fac);
+  const liveBy = {};
+  for (const s of (fiberLive && fiberLive.switches) || []) liveBy[s.name] = s;
+  const rows = [], rowsBy = {};
+  for (const S of m.switches) {
+    const s = liveBy[S.sw.name] || null;
+    const byPort = {};
+    if (s && !s.error) {
+      for (const [ns, p] of Object.entries(s.ports || {})) {
+        if (!p.optic || !p.optic.present) continue;
+        const n = Number(ns), prev = fiberPrev && fiberPrev.ports[`${s.name}|${n}`];
+        const r = { sw: s.name, n, p, optical: isOptical(p.optic), far: fiberFarEnd(S, n, p), ...fiberCheckPort(S, n, p, prev) };
+        byPort[n] = r;
+        rows.push(r);
+      }
+    }
+    rowsBy[S.sw.name] = byPort;
+    fiberModel[S.idx] = { S, s, rows: byPort };
+  }
+  fiberLinks = fiberBuildLinks(rowsBy);
+  fiberRows = rows;
+  box.innerHTML = fiberView === "room" ? renderFiberRooms(m) : fiberModel.map((F) => renderFiberSwitch(F.S, F.s, F.rows)).join("");
+  renderFiberNotes();
+  if (!fiberLive) {
+    el("fiber-summary").innerHTML = "";
+    el("fiber-export").disabled = true;
+    return;
+  }
+  const fiberAll = rows.filter((r) => r.optical);
+  const n = (l, list = rows) => list.filter((r) => r.level === l).length;
+  const metric = (label, value, ok, title = "") =>
+    `<div class="ls-metric ${ok ? "good" : "warn"}"${title ? ` title="${escapeHtml(title)}"` : ""}><span class="k">${label}</span><span class="v">${escapeHtml(value)}</span></div>`;
+  const errPorts = rows.filter((r) => fiberErrorsText(r.p) !== "0" && fiberErrorsText(r.p) !== "-").length;
+  const failed = fiberLive.switches.filter((s) => s.error).length;
+  const roomsRead = Object.values(fiberNms).filter((x) => !x.error).length, roomsAll = Object.keys(fiberNms).length;
+  const both = fiberLinks.filter((L) => L.r).length;
+  el("fiber-summary").innerHTML = [
+    metric("Fiber ports OK", `${fiberAll.filter((r) => r.level === "ok").length} / ${fiberAll.filter((r) => r.level !== "idle").length}`, !n("bad", fiberAll) && !n("warn", fiberAll), "Linked fiber ports with good light and no errors (unused ports not counted)"),
+    metric("Links, both ends", `${both} / ${fiberLinks.length}`, both === fiberLinks.length && roomsRead === roomsAll,
+      `Device fiber ports (from ${roomsRead} of ${roomsAll} rooms' NMS) matched to a switch port, so the loss is known in both directions`),
+    metric("Problems", String(n("bad")), !n("bad")),
+    metric("Warnings", String(n("warn")), !n("warn")),
+    metric("Ports with errors", String(errPorts), !errPorts, "Ports whose error counters aren't zero (since the switch booted or the counters were cleared)"),
+    metric("Unused SFPs", String(n("idle")), true, "SFP fitted but no light and no link"),
+    failed ? metric("Switches not read", String(failed), false) : "",
+  ].join("");
+  el("fiber-export").disabled = !rows.length;
+}
+
+// What couldn't be tested, shown in the main card whichever view is open. A
+// changed SSH key / NMS certificate is spelled out: the app refused on purpose,
+// and the fingerprint should only be removed once someone knows why it changed.
+function renderFiberNotes() {
+  const box = el("fiber-notes");
+  if (!fiberLive) { box.innerHTML = ""; return; }
+  const failed = Object.values(fiberNms).filter((r) => r.error).sort((a, b) => a.number - b.number);
+  const changed = failed.filter((r) => /host key changed|certificate changed/i.test(r.error));
+  const other = failed.filter((r) => !changed.includes(r));
+  const switches = fiberLive.switches.filter((s) => s.error);
+  const items = [];
+  if (changed.length) {
+    items.push(`<li class="issue-text"><b>OR ${changed.map((r) => r.number).join(", ")}: SSH host key or NMS certificate changed</b>, so the app refused to connect ` +
+      `and their device end wasn't tested. If ${changed.length === 1 ? "this room was" : "these rooms were"} re-imaged or replaced, remove the fingerprint ` +
+      `(<b>Actions &rarr; Power &amp; Maintenance &rarr; Remove SSH Fingerprint</b>) and test again. If nobody knows why it changed, don't: something may be ` +
+      `impersonating the room. Tell the team. <button class="action xs" id="fiber-select-changed">Select ${changed.length === 1 ? "it" : "them"} in Actions</button></li>`);
+  }
+  for (const r of other) items.push(`<li class="note-text">OR ${r.number}: device end not tested - ${escapeHtml(r.error)}</li>`);
+  for (const s of switches) items.push(`<li class="issue-text">${escapeHtml(s.name)} not tested - ${escapeHtml(s.error)}</li>`);
+  box.innerHTML = items.length ? `<ul class="switch-issues fiber-notes">${items.join("")}</ul>` : "";
+  const btn = el("fiber-select-changed");
+  if (btn) btn.addEventListener("click", () => {
+    // Only selects the rooms and opens Actions; removing the fingerprint stays a deliberate click there.
+    const want = new Set(changed.map((r) => r.number));
+    document.querySelectorAll("#rooms input[type=checkbox]").forEach((cb) => {
+      const on = want.has(Number(cb.dataset.room));
+      cb.checked = on;
+      cb.closest(".room-chip").classList.toggle("checked", on);
+      if (on) state.selected.add(Number(cb.dataset.room)); else state.selected.delete(Number(cb.dataset.room));
+    });
+    updateCounter();
+    document.querySelector('#tabs .tab[data-tab="actions"]').click();
+    toast(`Selected OR ${[...want].join(", ")}. Remove SSH Fingerprint is under Power & Maintenance - only if you know why the key changed.`, "info");
+  });
+}
+
+/* Port detail panel for the Fiber tab (same panel as the Network tab). */
+function openFiberPortPanel(swIdx, n) {
+  const F = fiberModel[swIdx];
+  if (!F) return;
+  const { S, s } = F, r = F.rows[n], st = s && s.ports && s.ports[String(n)];
+  const v = S.owner[n];
+  const rows = [
+    ["Switch", S.sw.name],
+    ["VLAN", v ? `${vlanTitle(v)}${v.tag ? ` \u00b7 VLAN ${v.tag}` : ""}` : "Not assigned to any VLAN"],
+    ["Link", !s || s.error ? "Not tested yet" : st && st.link ? `Up \u00b7 ${speedText(st.speed)}` : "No link"],
+  ];
+  let html = "";
+  if (!r) {
+    html = `<div class="settings-grid pp-grid">${rows.map(([k, val]) => settingCell(k, val)).join("")}</div>`;
+    if (s && !s.error) html += `<p class="legend-hint">No SFP module in this port.</p>`;
+  } else {
+    const o = r.p.optic, ddm = o.ddm || {};
+    if (r.far.name) rows.push(["Connected to", r.far.name]);
+    rows.push(["Module", [o.media, o.wavelength, r.optical ? "" : "copper / DAC, no light readings"].filter(Boolean).join(" \u00b7 ")]);
+    if (o.vendor || o.part) rows.push(["Vendor / part", [o.vendor, o.part].filter(Boolean).join(" ")]);
+    if (o.serial) rows.push(["Serial", o.serial]);
+    html = `<div class="settings-grid pp-grid">${rows.map(([k, val]) => settingCell(k, val)).join("")}`;
+    const reading = (label, key, unit, delta = null) => {
+      const m = ddm[key];
+      if (!m) return "";
+      const value = m.value == null ? "no light" : `${m.value}${unit ? ` ${unit}` : ""}`;
+      const extra = [m.status, rxChange(delta)].filter(Boolean).join(" \u00b7 ");
+      return settingCell(label, `${value} \u00b7 ${extra}`, ddmCls(m));
+    };
+    html += reading("Rx light", "rx_power", "dBm", r.rxDelta) + reading("Tx light", "tx_power", "dBm") +
+      reading("Temperature", "temp", "\u00b0C") + reading("Laser bias", "tx_bias", "mA") + reading("Supply voltage", "voltage", "V") +
+      settingCell("Errors", fiberErrorsText(r.p)) + "</div>";
+    if (ddm.rx_power && ddmLimits(ddm.rx_power)) html += `<div class="vlan-meta pp-note">Rx limits for this module: ${escapeHtml(ddmLimits(ddm.rx_power))} dBm</div>`;
+    if (o.supported === false) html += `<div class="vlan-meta pp-note">The switch lists this module as "Unsupported" (not Extreme-branded). That's normal for the lab optics.</div>`;
+    for (const L of r.links || []) {
+      const fmt = (v, unit) => (v == null ? "-" : `${v.toFixed(2)} ${unit}`);
+      html += `<div class="pp-device">
+        <div>${kindBadge(L.kind)} <strong>${escapeHtml(L.name)}</strong></div>
+        <div class="vlan-meta mono">${escapeHtml([L.iface, L.ip, L.mac].filter(Boolean).join(" \u00b7 "))}</div>
+        <div class="settings-grid pp-grid">
+          ${settingCell("Device Rx", [fmt(L.devRx, "dBm"), rxChange(L.rxDelta)].filter(Boolean).join(" \u00b7 "), outOfRange(L.devRx, FIBER_RANGE.rx) ? "note-text" : "")}
+          ${settingCell("Device Tx", fmt(L.devTx, "dBm"), outOfRange(L.devTx, FIBER_RANGE.tx) ? "note-text" : "")}
+          ${settingCell("Loss device \u2192 switch", fmt(L.lossToSw, "dB"))}
+          ${settingCell("Loss switch \u2192 device", fmt(L.lossToDev, "dB"))}
+          ${settingCell("Device receive errors", String(L.rxErrors ?? "-"))}
+          ${L.vendor || L.temp != null ? settingCell("Device SFP", [L.vendor, L.temp != null ? `${L.temp} \u00b0C` : ""].filter(Boolean).join(" \u00b7 ")) : ""}
+        </div>
+      </div>`;
+    }
+    html += `<div class="vlan-meta pp-note">Lab range: Rx ${escapeHtml(rangeText(FIBER_RANGE.rx))}, Tx ${escapeHtml(rangeText(FIBER_RANGE.tx))}.</div>`;
+    html += r.issues.map((i) => `<div class="${r.level === "bad" ? "issue-text" : "note-text"}">${escapeHtml(i)}</div>`).join("");
+    html += r.notes.map((i) => `<div class="legend-hint">${escapeHtml(i)}</div>`).join("");
+  }
+  el("pp-title").textContent = `Port ${n}`;
+  el("pp-body").innerHTML = html;
+  el("port-panel").hidden = false;
+  document.querySelectorAll(".port.selected").forEach((p) => p.classList.remove("selected"));
+  const btn = document.querySelector(`.port[data-fsw="${swIdx}"][data-port="${n}"]`);
+  if (btn) btn.classList.add("selected");
+}
+el("fiber-switches").addEventListener("click", (e) => {
+  const p = e.target.closest(".port[data-fsw]");
+  if (p) openFiberPortPanel(Number(p.dataset.fsw), Number(p.dataset.port));
+});
+document.querySelectorAll("#fiber-view .seg").forEach((b) => b.addEventListener("click", () => {
+  fiberView = b.dataset.view;
+  closePortPanel();
+  renderFiber();
+}));
+
+async function checkFiber({ quiet = false } = {}) {
+  const btn = el("fiber-check");
+  if (fiberBusy || btn.disabled) return;
+  fiberBusy = true;
+  const run = ++fiberRun;
+  const done = setBusy(btn, "Testing\u2026");
+  el("fiber-progress").textContent = "Reading the switches and each room's NMS\u2026";
+  const json = { "Content-Type": "application/json" };
+  // Device end, one request per room alongside the switch read; a room that fails doesn't stop the test.
+  const creds = credentials();
+  const nmsReads = Promise.all(state.rooms.filter((rm) => !rm.secondary).map(async (rm) => {
+    try {
+      const r = await fetch("/api/fiber/room", { method: "POST", headers: json, body: JSON.stringify({ room_number: rm.number, ...creds }) });
+      const d = await r.json().catch(() => ({ detail: r.statusText }));
+      return r.ok ? d : { number: rm.number, devices: [], error: d.detail || String(r.status) };
+    } catch (e) {
+      return { number: rm.number, devices: [], error: String(e.message || e) };
+    }
+  }));
+  try {
+    const res = await fetch("/api/switches/live", { method: "POST", headers: json, body: JSON.stringify({ fiber: true }) });
+    const d = await res.json().catch(() => ({ detail: res.statusText }));
+    if (!res.ok) throw new Error(d.detail || res.status);
+    const nms = {};
+    for (const r of await nmsReads) nms[r.number] = r;
+    if (run !== fiberRun) return;  // site changed while testing: this result is for the old one
+    fiberPrev = fiberLoadPrev();
+    fiberLive = d;
+    fiberNms = nms;
+    switchLive = d;  // also feeds the Network tab (same read, plus the fiber fields)
+    try { localStorage.setItem(fiberKey(), JSON.stringify(fiberSnapshot(d, nms))); } catch { /* storage full: no history */ }
+    el("fiber-updated").textContent = `tested ${new Date(d.checked_at * 1000).toLocaleTimeString()}`;
+    el("fiber-progress").textContent = fiberPrev ? `Compared with the test at ${new Date(fiberPrev.at * 1000).toLocaleString()}` : "First test on this computer - test again later to see changes.";
+    el("switches-status").textContent = `Checked ${new Date(d.checked_at * 1000).toLocaleTimeString()}`;
+    renderFiber();
+    renderSwitches(routerPorts && routerPorts.facility);
+    const bad = fiberRows.filter((r) => r.level === "bad").length, warn = fiberRows.filter((r) => r.level === "warn").length;
+    for (const s of d.switches.filter((x) => x.error)) logTo(GENERAL_TAB, `Fiber test: ${s.name}: ${s.error}`, "warning");
+    for (const r of Object.values(nms).filter((x) => x.error)) logTo(GENERAL_TAB, `Fiber test: OR ${r.number} device end not read: ${r.error}`, "warning");
+    for (const r of fiberRows.filter((x) => x.level === "bad")) logTo(GENERAL_TAB, `Fiber test: ${r.sw} port ${r.n}: ${r.issues.join(" ")}`, "warning");
+    logTo(GENERAL_TAB, `Fiber test: ${bad || warn ? `${bad} problem${bad === 1 ? "" : "s"}, ${warn} warning${warn === 1 ? "" : "s"}` : "no problems found"}.`, bad || warn ? "warning" : "success");
+  } catch (e) {
+    if (run !== fiberRun) return;
+    el("fiber-progress").textContent = "";
+    if (!quiet) toast(`Fiber test failed: ${e.message || e}`, "error");
+    logTo(GENERAL_TAB, `Fiber test failed: ${e.message || e}`, quiet ? "warning" : "error");
+  } finally {
+    fiberBusy = false;
+    done();
+    el("fiber-check").disabled = !(routerPorts && routerPorts.facility && routerPorts.facility.switches.length);
+  }
+}
+el("fiber-check").addEventListener("click", () => checkFiber());
+// Test the first time the tab is opened per site, when a router login is saved (like the Network tab).
+document.querySelector('#tabs .tab[data-tab="fiber"]').addEventListener("click", () => {
+  if (!fiberLive && hasCred("router-admin-password", "router_admin_password")) checkFiber({ quiet: true });
+});
+/* Export Excel: one row per link. The columns people read first are on the
+   left (result, where, both ends, loss, errors, what's wrong), module details
+   on the right. Sheets: Summary, one per switch, and All links. */
+const FIBER_EXPORT_HEAD = [
+  "Result", "Room", "Device", "Device port", "Switch", "Switch port", "Link",
+  "Switch Rx (dBm)", "Device Rx (dBm)", "Loss to switch (dB)", "Loss to device (dB)",
+  "Switch Tx (dBm)", "Device Tx (dBm)", "Switch Rx change (dB)", "Device Rx change (dB)",
+  "Errors", "Issues", "Notes",
+  "Media", "Switch module", "Wavelength", "Switch SFP vendor", "Switch SFP part", "Switch SFP serial",
+  "Switch SFP temp (C)", "Switch laser bias (mA)", "Switch SFP voltage (V)", "Device SFP vendor", "Device SFP temp (C)",
+  "Device ID", "Site", "Tested",
+];
+const FIBER_RESULT = { bad: "Problem", warn: "Warning", ok: "OK", idle: "Unused SFP" };
+// "Finding - advice" -> "Finding": the advice is in the app and the FAQ.
+const shortIssue = (text) => text.split(" - ")[0].replace(/\.$/, "");
+const num = (v, digits = 2) => (v == null || Number.isNaN(v) ? "" : Number(v.toFixed(digits)));
+function fiberExportRows() {
+  const swBy = {};
+  for (const F of fiberModel) if (F) swBy[F.S.sw.name] = F.S;
+  const reading = (r, key) => (r && r.p.optic.ddm && r.p.optic.ddm[key] ? r.p.optic.ddm[key].value : null);
+  const errorsText = (r, L) => {
+    const sw = r ? fiberErrorsText(r.p) : "-";
+    const parts = [sw !== "0" && sw !== "-" ? `Switch: ${sw}` : "", L && L.rxErrors ? `Device: ${L.rxErrors} receive` : ""].filter(Boolean);
+    return parts.join("; ") || "None";
+  };
+  const roomOf = (r) => {
+    const v = r && swBy[r.sw] && swBy[r.sw].owner[r.n];
+    return v && v.room ? Number(v.room) : null;
+  };
+  const tested = new Date(fiberLive.checked_at * 1000).toLocaleString();
+  const row = (r, L) => {
+    const st = L ? (L.r || L) : r, o = r ? r.p.optic : null;
+    const room = L ? L.room : roomOf(r);
+    return {
+      level: st.level, sw: r ? r.sw : "", n: r ? r.n : 0, iface: L ? L.iface : "",
+      // Worst first; fiber before copper/DAC; then by room, switch, port.
+      order: [FIBER_ORDER[st.level], r && !r.optical ? 1 : 0, room ?? 999, r ? r.sw : "", r ? r.n : 0, L ? L.iface : ""],
+      cells: [
+        FIBER_RESULT[st.level], room != null ? `OR ${room}` : "", L ? L.name : (r.far.vlanOnly ? "" : r.far.name), L ? L.iface : "",
+        r ? r.sw : "", r ? r.n : "", r ? (r.p.link ? `Up ${speedText(r.p.speed)}`.trim() : "Down") : "",
+        num(reading(r, "rx_power")), num(L && L.devRx), num(L && L.lossToSw), num(L && L.lossToDev),
+        num(reading(r, "tx_power")), num(L && L.devTx), num(r && r.rxDelta, 1), num(L && L.rxDelta, 1),
+        errorsText(r, L), st.issues.map(shortIssue).join("; "), st.notes.join("; "),
+        o ? (r.optical ? "Fiber" : "Copper/DAC") : "", o ? o.media || "" : "", o ? o.wavelength || "" : "",
+        o ? o.vendor || "" : "", o ? o.part || "" : "", o ? o.serial || "" : "",
+        num(reading(r, "temp"), 1), num(reading(r, "tx_bias"), 1), num(reading(r, "voltage")),
+        L ? L.vendor : "", num(L && L.temp, 0), L ? L.devId : "", lsSiteName(), tested,
+      ],
+    };
+  };
+  const rows = [];
+  for (const r of fiberRows) for (const L of r.links && r.links.length ? r.links : [null]) rows.push(row(r, L));
+  for (const L of fiberLinks.filter((x) => !x.r)) rows.push(row(null, L));  // device ports no switch port has learned
+  const cmp = (a, b) => (typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b)));
+  rows.sort((a, b) => a.order.reduce((acc, x, i) => acc || cmp(x, b.order[i]), 0));
+  return rows;
+}
+
+/* Minimal .xlsx writer (no library): Office Open XML parts with inline
+   strings, stored in an uncompressed zip. Text is always written as text, so
+   a device name can never become a formula. */
+const XLSX_STYLE = { normal: 0, header: 1, problem: 2, warning: 3, title: 4, label: 5 };
+const XLSX_STYLES = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<fonts count="3"><font><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="11"/><name val="Calibri"/></font><font><b/><sz val="14"/><name val="Calibri"/></font></fonts>
+<fills count="5"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFE2E8F0"/><bgColor indexed="64"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFFDE2E2"/><bgColor indexed="64"/></patternFill></fill>
+<fill><patternFill patternType="solid"><fgColor rgb="FFFEF3C7"/><bgColor indexed="64"/></patternFill></fill></fills>
+<borders count="2"><border><left/><right/><top/><bottom/><diagonal/></border><border><left/><right/><top/><bottom style="thin"><color rgb="FF94A3B8"/></bottom><diagonal/></border></borders>
+<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+<cellXfs count="6"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+<xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1"/>
+<xf numFmtId="0" fontId="0" fillId="3" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="0" fillId="4" borderId="0" xfId="0" applyFill="1"/>
+<xf numFmtId="0" fontId="2" fillId="0" borderId="0" xfId="0" applyFont="1"/>
+<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/></cellXfs>
+<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`;
+const xmlText = (s) => String(s).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "")
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const xlsxCol = (i) => { let s = ""; for (i += 1; i > 0; i = Math.floor((i - 1) / 26)) s = String.fromCharCode(65 + ((i - 1) % 26)) + s; return s; };
+// One sheet: rows = [{ cells: [...], style }], plus optional frozen header row + filter.
+function xlsxSheet({ rows, table = false, widths = null }) {
+  const ncols = Math.max(1, ...rows.map((r) => r.cells.length));
+  const w = widths || Array.from({ length: ncols }, (_, c) =>
+    Math.min(60, Math.max(8, ...rows.map((r) => String(r.cells[c] ?? "").length + 2))));
+  const data = rows.map((r, ri) => `<row r="${ri + 1}">${r.cells.map((v, ci) => {
+    if (v === "" || v == null) return "";
+    const ref = `${xlsxCol(ci)}${ri + 1}`, s = r.style ? ` s="${r.style}"` : "";
+    return typeof v === "number" && Number.isFinite(v)
+      ? `<c r="${ref}"${s}><v>${v}</v></c>`
+      : `<c r="${ref}"${s} t="inlineStr"><is><t xml:space="preserve">${xmlText(v)}</t></is></c>`;
+  }).join("")}</row>`).join("");
+  const view = table
+    ? '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>'
+    : '<sheetViews><sheetView workbookViewId="0"/></sheetViews>';
+  const filter = table && rows.length > 1 ? `<autoFilter ref="A1:${xlsxCol(ncols - 1)}${rows.length}"/>` : "";
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">${view}` +
+    `<cols>${w.map((x, i) => `<col min="${i + 1}" max="${i + 1}" width="${x}" customWidth="1"/>`).join("")}</cols>` +
+    `<sheetData>${data}</sheetData>${filter}</worksheet>`;
+}
+// Sheet names: max 31 chars, no []:*?/\, unique.
+function xlsxSheetNames(names) {
+  const used = new Set();
+  return names.map((n) => {
+    let base = String(n).replace(/[[\]:*?/\\]/g, " ").trim().slice(0, 31) || "Sheet", name = base;
+    for (let i = 2; used.has(name.toLowerCase()); i++) name = `${base.slice(0, 28)} ${i}`;
+    used.add(name.toLowerCase());
+    return name;
+  });
+}
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+function crc32(bytes) { let c = 0xffffffff; for (const b of bytes) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+// Uncompressed ("stored") zip: what an .xlsx is.
+function zipStore(files) {
+  const enc = new TextEncoder(), now = new Date(), parts = [], central = [];
+  const time = (now.getHours() << 11) | (now.getMinutes() << 5) | (now.getSeconds() >> 1);
+  const date = ((now.getFullYear() - 1980) << 9) | ((now.getMonth() + 1) << 5) | now.getDate();
+  let offset = 0;
+  for (const f of files) {
+    const name = enc.encode(f.name), data = enc.encode(f.data), crc = crc32(data);
+    const h = new DataView(new ArrayBuffer(30));
+    [[0, 0x04034b50, 4], [4, 20, 2], [6, 0x0800, 2], [8, 0, 2], [10, time, 2], [12, date, 2], [14, crc, 4],
+      [18, data.length, 4], [22, data.length, 4], [26, name.length, 2], [28, 0, 2]]
+      .forEach(([o, v, n]) => (n === 4 ? h.setUint32(o, v, true) : h.setUint16(o, v, true)));
+    const c = new DataView(new ArrayBuffer(46));
+    [[0, 0x02014b50, 4], [4, 20, 2], [6, 20, 2], [8, 0x0800, 2], [10, 0, 2], [12, time, 2], [14, date, 2], [16, crc, 4],
+      [20, data.length, 4], [24, data.length, 4], [28, name.length, 2], [30, 0, 2], [32, 0, 2], [34, 0, 2], [36, 0, 2],
+      [38, 0, 4], [42, offset, 4]]
+      .forEach(([o, v, n]) => (n === 4 ? c.setUint32(o, v, true) : c.setUint16(o, v, true)));
+    parts.push(h, name, data);
+    central.push(c, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cdSize = central.reduce((a, x) => a + x.byteLength, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  [[0, 0x06054b50, 4], [4, 0, 2], [6, 0, 2], [8, files.length, 2], [10, files.length, 2], [12, cdSize, 4], [16, offset, 4], [20, 0, 2]]
+    .forEach(([o, v, n]) => (n === 4 ? end.setUint32(o, v, true) : end.setUint16(o, v, true)));
+  return new Blob([...parts, ...central, end], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+}
+function xlsxWorkbook(sheets) {
+  const names = xlsxSheetNames(sheets.map((s) => s.name));
+  const ns = 'xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+  const filters = sheets.map((s, i) => (s.table && s.rows.length > 1
+    ? `<definedName name="_xlnm._FilterDatabase" localSheetId="${i}" hidden="1">'${names[i].replace(/'/g, "''")}'!$A$1:$${xlsxCol(Math.max(...s.rows.map((r) => r.cells.length)) - 1)}$${s.rows.length}</definedName>` : "")).join("");
+  return zipStore([
+    { name: "[Content_Types].xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>${sheets.map((_, i) => `<Override PartName="/xl/worksheets/sheet${i + 1}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`).join("")}</Types>` },
+    { name: "_rels/.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>` },
+    { name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook ${ns}><sheets>${names.map((n, i) => `<sheet name="${xmlText(n)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`).join("")}</sheets>${filters ? `<definedNames>${filters}</definedNames>` : ""}</workbook>` },
+    { name: "xl/_rels/workbook.xml.rels", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${sheets.map((_, i) => `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet${i + 1}.xml"/>`).join("")}<Relationship Id="rId${sheets.length + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>` },
+    { name: "xl/styles.xml", data: XLSX_STYLES },
+    ...sheets.map((s, i) => ({ name: `xl/worksheets/sheet${i + 1}.xml`, data: xlsxSheet(s) })),
+  ]);
+}
+
+// The fiber test as a workbook: Summary, one sheet per switch, All links.
+function fiberWorkbook() {
+  const rows = fiberExportRows();
+  const rowStyle = (level) => (level === "bad" ? XLSX_STYLE.problem : level === "warn" ? XLSX_STYLE.warning : 0);
+  const head = (cells) => ({ cells, style: XLSX_STYLE.header });
+  const tested = new Date(fiberLive.checked_at * 1000).toLocaleString();
+  // Per-switch sheets leave out what's the same on every row (switch, site, test time).
+  const drop = new Set(["Switch", "Site", "Tested"].map((h) => FIBER_EXPORT_HEAD.indexOf(h)));
+  const keep = (cells) => cells.filter((_, i) => !drop.has(i));
+  const count = (list, f) => list.filter(f).length;
+  const roomsAll = Object.keys(fiberNms).length, roomsRead = count(Object.values(fiberNms), (x) => !x.error);
+
+  const summary = [
+    { cells: [`Fiber test - ${lsSiteName()}`], style: XLSX_STYLE.title },
+    { cells: ["Tested", tested] },
+    { cells: ["Lab limits", `Rx ${rangeText(FIBER_RANGE.rx)}, Tx ${rangeText(FIBER_RANGE.tx)}, loss up to ${FIBER_MAX_LOSS} dB per direction`] },
+    { cells: ["Device end", `Read from ${roomsRead} of ${roomsAll} rooms' NMS`] },
+    { cells: [] },
+    head(["Switch", "Fiber ports", "Linked", "Problems", "Warnings", "Unused SFPs", "Copper/DAC", "Status"]),
+  ];
+  for (const s of fiberLive.switches) {
+    const mine = fiberRows.filter((r) => r.sw === s.name), fiber = mine.filter((r) => r.optical);
+    const bad = count(mine, (r) => r.level === "bad"), warn = count(mine, (r) => r.level === "warn");
+    summary.push({
+      cells: [s.name, fiber.length, count(fiber, (r) => r.p.link), bad, warn, count(mine, (r) => r.level === "idle"),
+        mine.length - fiber.length, s.error ? `Not tested: ${s.error}` : bad ? "Problems" : warn ? "Warnings" : "OK"],
+      style: s.error || bad ? XLSX_STYLE.problem : warn ? XLSX_STYLE.warning : 0,
+    });
+  }
+  const issues = rows.filter((x) => x.level === "bad" || x.level === "warn");
+  const col = (name) => FIBER_EXPORT_HEAD.indexOf(name);
+  summary.push({ cells: [] }, { cells: [`Problems and warnings (${issues.length})`], style: XLSX_STYLE.label },
+    head(["Result", "Room", "Device", "Device port", "Switch", "Switch port", "Issues"]));
+  if (!issues.length) summary.push({ cells: ["None"] });
+  for (const x of issues) {
+    summary.push({ cells: ["Result", "Room", "Device", "Device port", "Switch", "Switch port", "Issues"].map((h) => x.cells[col(h)]), style: rowStyle(x.level) });
+  }
+  const failed = Object.values(fiberNms).filter((x) => x.error).sort((a, b) => a.number - b.number);
+  if (failed.length) {
+    summary.push({ cells: [] }, { cells: [`Rooms whose device end wasn't tested (${failed.length})`], style: XLSX_STYLE.label }, head(["Room", "Reason"]));
+    for (const f of failed) summary.push({ cells: [`OR ${f.number}`, f.error], style: XLSX_STYLE.warning });
+  }
+
+  const sheets = [{ name: "Summary", rows: summary, widths: [16, 14, 34, 14, 16, 12, 90, 30] }];
+  for (const s of fiberLive.switches) {
+    const mine = rows.filter((x) => x.sw === s.name)
+      .sort((a, b) => a.n - b.n || String(a.iface).localeCompare(String(b.iface)));
+    sheets.push({
+      name: s.name, table: true,
+      rows: [head(keep(FIBER_EXPORT_HEAD)), ...(s.error ? [{ cells: [`Not tested: ${s.error}`], style: XLSX_STYLE.problem }]
+        : mine.map((x) => ({ cells: keep(x.cells), style: rowStyle(x.level) })))],
+    });
+  }
+  sheets.push({ name: "All links", table: true, rows: [head(FIBER_EXPORT_HEAD), ...rows.map((x) => ({ cells: x.cells, style: rowStyle(x.level) }))] });
+  return xlsxWorkbook(sheets);
+}
+el("fiber-export").addEventListener("click", () => {
+  const d = new Date(), p = (x) => String(x).padStart(2, "0");
+  const ts = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  lsDownload(`fiber-test-${lsSiteName().replace(/[^A-Za-z0-9]+/g, "-").toLowerCase()}-${ts}.xlsx`, fiberWorkbook(),
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+});
 el("router-ports-copy").addEventListener("click", async () => {
   const ok = await copyToClipboard(el("router-ports-script").value);
-  el("router-ports-status").textContent = ok ? "Copied to clipboard." : "Copy failed \u2014 select the text manually.";
+  el("router-ports-status").textContent = ok ? "Copied to clipboard." : "Copy failed - select the text manually.";
 });
 
 /* ---------- Facility config import (Settings) ---------- */
@@ -1098,9 +1928,9 @@ el("router-apply-confirm").addEventListener("change", (e) => {
 });
 el("router-apply-nat").addEventListener("click", () => {
   const router_admin_username = el("router-admin-username").value.trim();
-  const router_admin_password = el("router-admin-password").value;
+  const router_admin_password = el("router-admin-password").value || null;  // blank = the saved one (server side)
   const router_enable_password = el("router-enable-password").value || null;
-  if (!router_admin_username || !router_admin_password) {
+  if (!router_admin_username || !hasCred("router-admin-password", "router_admin_password")) {
     logLine("Enter the router SSH username and password first.", "warning");
     return;
   }
@@ -1275,7 +2105,7 @@ function lsDeviceRows(r) {
     const fans = h && h.fans.length
       ? `<div class="mono">Fan${h.fans.length > 1 ? "s" : ""} ${h.fans.map((f) => reading(`${f.rpm ?? "?"} rpm`, f.alerts.length)).join(" / ")}</div>`
       : "";
-    const healthCell = h ? `${temps || "\u2014"}${fans}` : '<span class="mono">n/a</span>';
+    const healthCell = h ? `${temps || "-"}${fans}` : '<span class="mono">n/a</span>';
     return `<tr><td>${escapeHtml(d.kind.charAt(0) + d.kind.slice(1).toLowerCase())}</td>` +
       `<td>${escapeHtml(d.model || "")}<div class="mono">${escapeHtml(d.id || "")}${d.firmware ? ` &middot; fw ${escapeHtml(d.firmware)}` : ""}</div></td>` +
       `<td>${d.state === "ONLINE" ? lsPill("good", "online") : lsPill("bad", d.state.toLowerCase())}` +
@@ -1351,8 +2181,8 @@ async function runLabStatus(numbers) {
   if (labStatus.busy) return;
   if (!numbers.length) { toast("Select at least one room in the sidebar first.", "warning"); return; }
   const creds = credentials();
-  if (!creds.ssh_password) { toast("Enter the SSH password in the sidebar first.", "warning"); return; }
-  if (!creds.sudo_password) toast("No sudo password: only services are checked, not devices or license.", "warning");
+  if (!hasCred("ssh-password", "ssh_password")) { toast("Enter the SSH password in the sidebar first.", "warning"); return; }
+  if (!hasCred("sudo-password", "sudo_password")) toast("No sudo password: only services are checked, not devices or license.", "warning");
   const run = ++labStatus.run;
   const abort = new AbortController();
   labStatus.abort = abort;
@@ -1411,6 +2241,7 @@ async function runLabStatus(numbers) {
     if (c && c.length) logTo(GENERAL_TAB, `OR ${n} changed since the last check: ${c.join("; ")}`, "info");
   }
   if (routerPorts) renderSwitches(routerPorts.facility);
+  if (fiberLive) renderFiber();  // encoder/decoder names come from this check
 }
 /* Export the last check: Markdown (tickets / handoffs) or CSV (spreadsheets). */
 function lsSiteName() {
@@ -1471,7 +2302,7 @@ function lsExportMarkdown() {
   lsDownload(lsExportName("md"), out.join("\n") + "\n", "text/markdown");
 }
 function lsExportCsv() {
-  const q = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+  const q = csvCell;
   const head = ["room", "room_state", "software_version", "software_build", "uptime", "matrix_api", "barco_nms", "license",
     "device_type", "model", "device_id", "device_state", "firmware", "licensed", "cpu_temp_c", "fpga_temp_c", "device_alerts", "room_issues"];
   const lines = [head.join(",")];
@@ -1493,7 +2324,7 @@ el("ls-check-all").addEventListener("click", () => runLabStatus(state.rooms.map(
 el("ls-check-selected").addEventListener("click", () => runLabStatus(selectedRoomNumbers()));
 // Facility is the first tab, so fill it in on open / site switch without a click.
 function autoCheckLabStatus() {
-  if (state.rooms.length && el("ssh-password").value) runLabStatus(state.rooms.map((r) => r.number));
+  if (state.rooms.length && hasCred("ssh-password", "ssh_password")) runLabStatus(state.rooms.map((r) => r.number));
 }
 
 /* ---------- Site profiles ---------- */
@@ -1540,6 +2371,19 @@ function prefill(id, value, force = false) {
   if (!el(id)) return;
   if (value && (force || !el(id).value)) el(id).value = value;
 }
+// Saved passwords/tokens never reach the page: the server only says whether
+// one is saved, and uses it when the field is left blank. The box shows a
+// "saved" hint instead. On a site switch (clear), lab passwords typed for the
+// previous lab are cleared so they aren't sent to the new one.
+function markSaved(id, saved, clear = false) {
+  const input = el(id);
+  if (!input) return;
+  if (input.dataset.ph === undefined) input.dataset.ph = input.placeholder || "";
+  if (clear) input.value = "";
+  input.placeholder = saved ? "Saved - leave blank to use it" : input.dataset.ph;
+}
+// A credential is available if it's typed in, or saved on this computer.
+const hasCred = (id, key) => !!(el(id).value || (state.setup && state.setup.saved && state.setup.saved[key]));
 async function loadSetup(force = false) {
   const s = await (await fetch("/api/setup")).json();
 
@@ -1560,7 +2404,7 @@ async function loadSetup(force = false) {
   el("env-path").textContent = s.env_path;
   el("env-badge").textContent = s.env_present ? "detected" : "not found";
   el("env-badge").className = "badge " + (s.env_present ? "subtle" : "subtle");
-  const p = s.prefill, sec = s.secrets;
+  const p = s.prefill, sec = s.saved;
   const yn = (val) => (val ? "set" : "not set");
   const cls = (val) => (val ? "on" : "off");
   el("settings-env").innerHTML = [
@@ -1583,13 +2427,13 @@ async function loadSetup(force = false) {
   prefill("webapp-local-dist", p.webapp_dist, force);
   prefill("webapp-local-web", p.webapp_web, force);
   fillFoldersCard(s);
-  prefill("ssh-password", sec.ssh_password, force);
-  prefill("sudo-password", sec.sudo_password, force);
-  prefill("artifactory-token", sec.artifactory_token, force);
-  prefill("jenkins-token", sec.jenkins_token, force);
+  markSaved("ssh-password", sec.ssh_password, force);
+  markSaved("sudo-password", sec.sudo_password, force);
+  markSaved("artifactory-token", sec.artifactory_token);
+  markSaved("jenkins-token", sec.jenkins_token);
   prefill("router-admin-username", p.router_admin_username, force);
-  prefill("router-admin-password", sec.router_admin_password, force);
-  prefill("router-enable-password", sec.router_enable_password, force);
+  markSaved("router-admin-password", sec.router_admin_password, force);
+  markSaved("router-enable-password", sec.router_enable_password, force);
 
   // SWU download folder: prefer the .env SWU_FILE dir if given, else the
   // server's default cache folder. Only fill when empty so edits stick.
@@ -1605,7 +2449,7 @@ async function loadSetup(force = false) {
 }
 function maybeAskCreds() {
   const s = state.setup;
-  if (s && !s.secrets.ssh_password && !credsSkipped.has(s.lab_env_path)) openCredsModal();
+  if (s && !s.saved.ssh_password && !credsSkipped.has(s.lab_env_path)) openCredsModal();
 }
 
 /* ---------- Team (QA vs Integration) + QA lock ---------- */
@@ -1738,18 +2582,20 @@ document.querySelectorAll("#team-selector .seg").forEach((b) => b.addEventListen
 
 /* ---------- First-run / saved credentials ---------- */
 const credsSkipped = new Set();
+// "saved" fields are passwords/tokens: the page only knows whether one is
+// saved, never its value, so those boxes start empty ("blank keeps the saved one").
 const CREDS_FIELDS = {
-  "creds-ssh": ["secrets", "ssh_password"],
-  "creds-sudo": ["secrets", "sudo_password"],
+  "creds-ssh": ["saved", "ssh_password"],
+  "creds-sudo": ["saved", "sudo_password"],
   "creds-art-email": ["prefill", "artifactory_email"],
-  "creds-art-token": ["secrets", "artifactory_token"],
+  "creds-art-token": ["saved", "artifactory_token"],
   "creds-jenkins-user": ["prefill", "jenkins_username"],
-  "creds-jenkins-token": ["secrets", "jenkins_token"],
+  "creds-jenkins-token": ["saved", "jenkins_token"],
   "creds-router-user": ["prefill", "router_admin_username"],
-  "creds-router-pass": ["secrets", "router_admin_password"],
-  "creds-router-enable": ["secrets", "router_enable_password"],
-  "creds-switch-pass": ["secrets", "switch_password"],
-  "creds-windows-pass": ["secrets", "windows_password"],
+  "creds-router-pass": ["saved", "router_admin_password"],
+  "creds-router-enable": ["saved", "router_enable_password"],
+  "creds-switch-pass": ["saved", "switch_password"],
+  "creds-windows-pass": ["saved", "windows_password"],
 };
 function openCredsModal() {
   const s = state.setup;
@@ -1757,10 +2603,8 @@ function openCredsModal() {
   el("creds-site").textContent = s.connection.site_name || "this lab";
   for (const [id, [group, key]] of Object.entries(CREDS_FIELDS)) {
     const saved = s[group][key];
-    // Saved passwords are filled in (masked; the eye shows them). The page
-    // already has them for the sidebar, so nothing new leaves the server.
-    el(id).value = saved || "";
-    if (group === "secrets") {
+    el(id).value = group === "saved" ? "" : saved || "";
+    if (group === "saved") {
       el(id).type = "password";
       el(id).placeholder = saved ? "blank keeps the saved one" : "";
       credsRevealButton(el(id));
@@ -1817,17 +2661,15 @@ el("creds-modal").addEventListener("keydown", (e) => { if (e.key === "Enter") el
 el("creds-modal").addEventListener("input", (e) => {
   const field = e.target.closest(".field.secret");
   if (!field) return;
-  const [group, key] = CREDS_FIELDS[e.target.id];
-  const v = e.target.value;
-  field.classList.toggle("replacing", field.classList.contains("is-saved") && !!v && v !== state.setup[group][key]);
+  field.classList.toggle("replacing", field.classList.contains("is-saved") && !!e.target.value);
 });
 el("creds-modal-save").addEventListener("click", async () => {
-  // Only send what changed; blank or unchanged = keep what's saved.
+  // Only send what changed; blank (or an unchanged name) = keep what's saved.
   const s = state.setup;
   const body = {};
   for (const [id, [group, key]] of Object.entries(CREDS_FIELDS)) {
     const v = el(id).value;
-    body[key] = v.trim() && v !== (s[group][key] || "") ? v : null;
+    body[key] = v.trim() && (group === "saved" || v !== (s[group][key] || "")) ? v : null;
   }
   const saved = Object.values(body).filter((v) => v !== null).length;
   el("creds-error").hidden = true;
@@ -1898,7 +2740,7 @@ el("folders-save").addEventListener("click", async () => {
     }
     const when = new Date().toLocaleTimeString();
     if (d.warnings.length) {
-      status.textContent = `Saved at ${when} \u2014 ${d.warnings.join("; ")}`;
+      status.textContent = `Saved at ${when} - ${d.warnings.join("; ")}`;
       toast(`Folders saved, but ${d.warnings.length} not found on this computer.`, "warning");
     } else {
       status.textContent = `\u2714 Saved at ${when}`;
@@ -1975,7 +2817,7 @@ async function loadPreflight() {
   banner.className = "setup-banner error";
   if (errors.length) {
     el("setup-banner-text").textContent = errors.length === 1
-      ? `Setup needs attention: ${errors[0].label} \u2014 ${errors[0].detail}`
+      ? `Setup needs attention: ${errors[0].label} - ${errors[0].detail}`
       : `Setup needs attention: ${errors.length} problems (${errors.map((c) => c.label).join(", ")}).`;
     const fixable = errors.find((c) => c.action);
     const fixBtn = el("setup-banner-fix");
@@ -1988,7 +2830,7 @@ async function loadPreflight() {
 
   if (!preflightLogged) {
     preflightLogged = true;
-    if (s.errors) logTo(GENERAL_TAB, `Setup Check: ${s.errors} problem(s) to fix \u2014 see Settings > Setup Check.`, "error");
+    if (s.errors) logTo(GENERAL_TAB, `Setup Check: ${s.errors} problem(s) to fix - see Settings > Setup Check.`, "error");
     else if (s.warnings) logTo(GENERAL_TAB, `Setup Check: ready. ${s.warnings} optional item(s) not set up (Settings > Setup Check).`, "info");
     else logTo(GENERAL_TAB, "Setup Check: all good.", "success");
   }
@@ -2394,7 +3236,7 @@ async function fetchAndCopyNmsPassword(roomNumbers) {
         logTo(
           GENERAL_TAB,
           ok ? `Copied OR ${n} NMS password to clipboard.`
-             : `Couldn't copy OR ${n}'s NMS password to the clipboard \u2014 click NMS again with this window focused.`,
+             : `Couldn't copy OR ${n}'s NMS password to the clipboard - click NMS again with this window focused.`,
           ok ? "success" : "warning",
         );
         copied = true;
@@ -2689,8 +3531,8 @@ async function refreshTunnels() {
 /* ---------- Integrations ---------- */
 function startDownload(branch) {
   startJob("/api/jobs/download-latest", {
-    artifactory_email: el("artifactory-email").value,
-    artifactory_token: el("artifactory-token").value,
+    artifactory_email: el("artifactory-email").value || null,
+    artifactory_token: el("artifactory-token").value || null,  // blank = the saved one (server side)
     cache_dir: el("download-dir").value || null,
     branch: branch || null,
   }, { needRooms: false, title: branch ? `Download SWU (${branch})` : "Download SWU" });
@@ -2744,8 +3586,8 @@ el("download-latest").addEventListener("click", async () => {
 });
 el("trigger-build").addEventListener("click", () => {
   startJob("/api/jobs/trigger-build", {
-    jenkins_username: el("jenkins-username").value,
-    jenkins_token: el("jenkins-token").value,
+    jenkins_username: el("jenkins-username").value || null,
+    jenkins_token: el("jenkins-token").value || null,  // blank = the saved one (server side)
   }, { needRooms: false, title: "Jenkins Build" });
 });
 

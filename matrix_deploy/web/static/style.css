@@ -969,3 +969,23 @@ tr.has-issue td { background: color-mix(in srgb, var(--danger) 6%, transparent);
 .pp-grid { grid-template-columns: 1fr; gap: 6px; }
 .pp-device { border-top: 1px solid var(--border); padding-top: 10px; margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; }
 .note-text { color: var(--warn); font-size: 12px; font-weight: 600; }
+
+/* ---------- Fiber Test ---------- */
+/* Ports coloured by result, like the router forwards (.port.fwd.*). */
+.port.fib.ok { --port: var(--success); }
+.port.fib.warn { --port: var(--warn); }
+.port.fib.bad { --port: var(--danger); }
+.port.fib.copper { --port: #64748b; }
+.port.fib.idle { --port: var(--text-faint); }
+.port.mini { width: 12px; height: 12px; display: inline-block; vertical-align: -2px; margin-right: 4px; box-shadow: none; }
+#fiber-legend { margin-top: 12px; }
+.switch-issues.notes { color: var(--warn); }
+.fiber-notes { margin: 12px 0 0; display: flex; flex-direction: column; gap: 6px; }
+.fiber-notes li { font-weight: 400; }
+.fiber-notes .action { margin-left: 6px; vertical-align: middle; }
+/* Nine columns: let headers and names wrap so the status text has room. */
+#fiber-switches .data-table th { white-space: normal; vertical-align: bottom; }
+#fiber-switches .data-table td.fib-name { white-space: normal; min-width: 210px; }
+#fiber-switches .data-table td:last-child { white-space: normal; min-width: 300px; }
+.pp-note { white-space: normal; margin-top: 8px; }
+.kind-badge.k-switch { color: #64748b; border-color: color-mix(in srgb, #64748b 40%, var(--border)); }

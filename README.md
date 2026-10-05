@@ -39,7 +39,7 @@ All deployment logic lives in the core modules. `web/` is a thin HTTP/WebSocket
 layer over them.
 
 **Config workflow:** there are no golden templates. Each room's
-`matrix.api.config.json` is edited live — load it from the room, edit it, then
+`matrix.api.config.json` is edited live - load it from the room, edit it, then
 push it back and restart matrix-api (Config tab in the web UI).
 
 ## Installation

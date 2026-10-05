@@ -52,8 +52,13 @@ gap.
   the next time the app starts.
 - Passwords you only type into the app's fields stay in memory and are gone
   when the app closes.
+- Saved passwords and tokens are only decrypted inside the app's server and
+  never sent to its window. The window only learns *whether* one is saved
+  (the box says "Saved - leave blank to use it"), and the server fills it in.
+  So even a bug in the page couldn't read them.
 - The app never prints passwords to the console. The NMS password is copied to
-  your clipboard, never shown.
+  your clipboard, never shown. The sign-in key is blanked out of the request
+  log.
 
 **Why:** the app folder often lives in OneDrive or gets copied around.
 Encryption means a copied or synced file doesn't leak anything.

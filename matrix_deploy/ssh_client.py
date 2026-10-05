@@ -136,17 +136,33 @@ def strip_ansi(text: str) -> str:
     return _ANSI_CSI_RE.sub("", text)
 
 
-def connect(target: SSHTarget, timeout: int = 10, try_keys: bool = True) -> paramiko.SSHClient:
+# SHA-1 in SSH: the old "ssh-rsa" signature (GHSA-r374-rxx8-8654) and SHA-1
+# key exchanges. Refused by default (sha1="refuse"). The rooms run modern
+# OpenSSH (ECDSA host keys, SHA-2) and carry the secrets (sudo, NMS passwords,
+# room configs). Only the lab network gear opts in:
+#   "fallback": SHA-2 first, SHA-1 only if the device offers nothing else
+#               (routers: QA1's signs with rsa-sha2-512, older Cisco IOS may not).
+#   "allow":    straight to SHA-1 (EXOS switches: ssh-rsa only; skipping the
+#               SHA-2 attempt saves a handshake per switch read).
+_NO_SHA1 = {
+    "keys": ["ssh-rsa"],
+    "pubkeys": ["ssh-rsa"],
+    "kex": ["diffie-hellman-group1-sha1", "diffie-hellman-group14-sha1", "diffie-hellman-group-exchange-sha1"],
+}
+
+
+def connect(target: SSHTarget, timeout: int = 10, try_keys: bool = True, sha1: str = "refuse") -> paramiko.SSHClient:
     """Connect with the password if one is given, falling back to SSH keys.
 
     Password first because the labs use passwords: trying local keys first
     cost an extra failed handshake (2-4 s per room). ``try_keys=False`` never
     tries keys: network gear (Cisco) drops the session after a few failed
-    attempts, which local keys use up.
+    attempts, which local keys use up. ``sha1`` ("refuse" / "fallback" /
+    "allow") is only loosened for the lab router and switches (see ``_NO_SHA1``).
 
     Raises ``SSHError`` with a descriptive message if every method fails.
     """
-    def attempt(use_keys: bool) -> paramiko.SSHClient:
+    def attempt(use_keys: bool, strict: bool = sha1 != "allow") -> paramiko.SSHClient:
         client = paramiko.SSHClient()
         with _KNOWN_HOSTS_LOCK:
             if KNOWN_HOSTS.exists():
@@ -155,9 +171,17 @@ def connect(target: SSHTarget, timeout: int = 10, try_keys: bool = True) -> para
         try:
             client.connect(hostname=target.host, port=target.port, username=target.username,
                            password=None if use_keys else target.password, timeout=timeout,
-                           look_for_keys=use_keys, allow_agent=use_keys)
+                           look_for_keys=use_keys, allow_agent=use_keys,
+                           disabled_algorithms=_NO_SHA1 if strict else None)
             client.md_sudo_password = target.sudo_password
             return client
+        except paramiko.ssh_exception.IncompatiblePeer as exc:
+            if strict and sha1 == "fallback":
+                return attempt(use_keys, strict=False)  # older device: SHA-1 is all it has
+            raise SSHError(
+                f"Refused {target.host}:{target.port}: it only offers outdated SHA-1 SSH signatures or key exchange. "
+                "The rooms run modern SSH, so this isn't how a room normally answers. Don't connect; tell the team."
+            ) from exc
         except paramiko.BadHostKeyException as exc:
             raise SSHError(
                 f"Refused {target.host}:{target.port}: its SSH host key changed since this computer last "

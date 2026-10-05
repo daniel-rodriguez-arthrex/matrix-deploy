@@ -86,7 +86,9 @@ window.FAQ_SECTIONS = [
           "SSH/sudo passwords in <code>config\\&lt;lab&gt;.env</code>, and Artifactory/Jenkins in <code>.env</code> next to " +
           "<code>MatrixDeploy.exe</code>. Another Windows user or computer can't read them; if you copy the folder elsewhere, enter them again there. " +
           "Passwords that are still plain text (the lab passwords that come with the zip, or ones typed into a <code>.env</code> by hand) are " +
-          "encrypted the next time the app starts. Anything you type directly into the sidebar or tab fields stays in memory and is gone when you " +
+          "encrypted the next time the app starts. Saved passwords are never sent to the app's window: a box with a saved one just says " +
+          "<i>Saved - leave blank to use it</i>, and the app uses the saved value when you leave it empty. Type into it to use a different one " +
+          "for now. Anything you type directly into the sidebar or tab fields stays in memory and is gone when you " +
           "close the app. Share the original zip, not your own folder.",
       },
       {
@@ -172,7 +174,7 @@ window.FAQ_SECTIONS = [
           "<b>All forwards</b> (folded) has the same plan as a table.</li>" +
           "<li><b>Check live router</b> logs in to the router (read-only, it never enters config mode) and colours each square " +
           "<b>green</b> (forwarded), <b>red</b> (missing) or <b>amber</b> (the port is used by something else). The line above says how many " +
-          "forwards are OK, and every problem is spelled out with what it breaks (e.g. <i>OR 4 SSH: port 204 isn't forwarded &mdash; this app can't SSH in</i>) " +
+          "forwards are OK, and every problem is spelled out with what it breaks (e.g. <i>OR 4 SSH: port 204 isn't forwarded - this app can't SSH in</i>) " +
           "or where the port goes instead. Every other forward on the router is listed under <b>Other ports in use</b>, labelled with what " +
           "it points at (room DevTools, Extron, switch SSH...). It runs automatically the first time you open the tab when a router password is saved for the lab.</li>" +
           "<li><b>Switches</b>: each switch's ports coloured by room VLAN, uplink and backbone, like the facility planner, plus each VLAN's tag, " +
@@ -221,11 +223,72 @@ window.FAQ_SECTIONS = [
         q: "How does \"Apply to Router\" actually change the router?",
         a: "It opens a real SSH session to the router (needs a privileged admin account, not a read-only one), sends " +
           "<code>enable</code> (with the enable password if the router asks for one), then <code>configure terminal</code>, each " +
-          "NAT line in the box, <code>end</code> and <code>write memory</code> &mdash; the same steps you'd type by hand. Enter the router " +
+          "NAT line in the box, <code>end</code> and <code>write memory</code> - the same steps you'd type by hand. Enter the router " +
           "SSH username/password (and enable password if needed) under <b>Network &rarr; Fix router config</b>, pick the rules (or edit the commands), " +
           "tick the confirm box after reviewing them, then click <b>Apply to Router</b>. The console tab shows the router's live output. Save these once under " +
           "<b>Settings &rarr; Edit saved credentials &rarr; Router, switches &amp; Windows</b> and they'll prefill next time (per-lab, like the " +
           "SSH/sudo passwords). Because this writes live config to lab network infrastructure, double-check the commands first.",
+      },
+    ],
+  },
+  {
+    title: "Fiber Test",
+    items: [
+      {
+        q: "What does the Fiber Test tab check?",
+        a: "<b>Test Fiber</b> checks both ends of every fiber link, like the lab's <code>mg2diagnostics --fiber-test</code>. At the same time it " +
+          "logs in to every switch (read-only, the same way as <b>Check switches</b>) for each SFP's light levels and the port error counters, and asks each room's " +
+          "Barco NMS for every encoder/decoder port's SFP light and receive errors. Each device port is matched to its switch port by MAC, which gives the " +
+          "<b>loss in both directions</b>: device Tx &minus; switch Rx (<i>loss to switch</i>) and switch Tx &minus; device Rx (<i>loss to device</i>). " +
+          "The device end needs the SSH and sudo passwords in the sidebar (the NMS login is read from each room, like the Facility check). " +
+          "The test runs by itself the first time you open the tab, when a router password is saved for the lab." +
+          "<ul>" +
+          "<li><b>By switch</b>: each switch's ports coloured by result (green OK, amber warning, red problem, grey-blue copper/DAC, faded unused SFP, " +
+          "dashed no module), with the problems and warnings listed under it. <b>Click a port</b> for its module (type, vendor, serial, temperature, laser bias), " +
+          "the light at both ends, the loss each way and the errors. <b>Modules</b> (folded) lists every SFP in the switch.</li>" +
+          "<li><b>By room</b>: every encoder/decoder fiber port per room, with its switch port, switch Rx, device Rx, the loss each way, errors and status.</li>" +
+          "<li><b>Connected to</b>: the switch on the other end (LLDP), or the device the Network tab names on that port. " +
+          "Run the <b>Facility</b> check first to get encoder/decoder names.</li>" +
+          "<li><b>Errors</b>: the switch's CRC, alignment, fragment, jabber, undersize/oversize, transmit, collision and parity counters (since the switch started " +
+          "or the counters were last cleared) and the device's receive errors. Dropped packets aren't counted (that's congestion, not the fiber).</li>" +
+          "<li>After a re-test, &#9650;/&#9660; next to a reading shows how much the received light changed (e.g. after cleaning a connector).</li>" +
+          "</ul>" +
+          "<b>Export Excel</b> downloads the test as an Excel workbook (also listed under <b>Logs &rarr; Downloads</b>):" +
+          "<ul>" +
+          "<li><b>Summary</b>: when it was tested, the lab limits, one line per switch (fiber ports, linked, problems, warnings, unused SFPs, copper/DAC), " +
+          "every problem and warning in one list, and any room whose device end couldn't be read.</li>" +
+          "<li><b>One sheet per switch</b>: that switch's ports in port order. Problem rows are light red and warnings amber.</li>" +
+          "<li><b>All links</b>: every switch in one table, problems first, for filtering across switches or combining several tests.</li>" +
+          "</ul>" +
+          "The first columns are what you usually need: <i>Result, Room, Device, Device port, Switch port, Link, Switch Rx, Device Rx, Loss to switch, " +
+          "Loss to device</i>, then Tx, the change since the last test, errors and a short description of each issue. Module details (type, vendor, part, " +
+          "serial, temperature, laser bias, voltage) are on the right for inventory and RMAs. The header row stays visible while scrolling and has filters, " +
+          "so you can show only problems or one room. Nothing on the switches or rooms is changed and the counters aren't cleared.",
+      },
+      {
+        q: "What do the Fiber Test problems and warnings mean?",
+        a: "<ul>" +
+          "<li><b>Rx outside the lab's range</b> (&minus;5 to &minus;1.5 dBm, at the switch or the device): check the cabling. Usually a dirty or loose connector, " +
+          "a tight bend or a damaged patch cable. Clean both ends, reseat, and test again. Below &minus;22 dBm there's no light at all (link down).</li>" +
+          "<li><b>Tx outside the lab's range</b> (&minus;4.5 to &minus;1.5 dBm): the SFP sending it is probably bad (in the switch or the device).</li>" +
+          "<li><b>High loss</b> (more than 3 dB in one direction): that strand of the fiber pair is dirty, bent or damaged. If only one direction is high, " +
+          "clean or replace that strand; the other one is fine.</li>" +
+          "<li><b>Weak light received</b> / alarm and warning wording: the SFP's own limits were crossed (shown in the port panel).</li>" +
+          "<li><b>Receiving too much light</b>: the receiver is overloaded, typically a long-reach (LR) optic on a short link. Use matching optics or an attenuator.</li>" +
+          "<li><b>Sending too little/too much light</b>, <b>laser bias</b>, <b>running hot</b>, <b>supply voltage</b>: the SFP module itself is failing or overheating. Replace it or check the switch's airflow.</li>" +
+          "<li><b>Light is arriving but there's no link</b>: the two ends don't match (1G vs 10G, SR vs LR, or a wrong optic on the device).</li>" +
+          "<li><b>No light</b> on a port with an SFP and no link is shown as an <i>unused SFP</i> (greyed out). On a router uplink or switch " +
+          "backbone port it's a problem: the fiber is unplugged or broken, or the far end is off.</li>" +
+          "<li><b>Errors since the counters were last cleared</b> / <b>since it started</b> (warning): they may be old. Test again: <b>new errors since the last test</b> (problem) " +
+          "means the link is corrupting traffic right now. The last test is remembered on this computer per lab, so the comparison also works after restarting the app.</li>" +
+          "<li><b>The device reports...</b>: an SFP alert from the device's own diagnostics (NMS).</li>" +
+          "<li><b>Switch end not found</b>: no switch port has learned that device port's MAC (idle link, or its switch couldn't be read).</li>" +
+          "<li><b>SSH host key or NMS certificate changed</b> (red, under the summary): the app refused to connect to those rooms on purpose, so their device end " +
+          "wasn't tested. If they were re-imaged or replaced, click <b>Select them in Actions</b> and use <b>Remove SSH Fingerprint</b>, then test again. " +
+          "If nobody knows why the key changed, don't remove it; tell the team. A switch whose key changed says which line to delete in the app's known_hosts file " +
+          "(Remove Fingerprint only covers rooms).</li>" +
+          "</ul>" +
+          "The SFP alarm/warning wording uses each module's own limits; the lab ranges are the ones the team's fiber test script uses.",
       },
     ],
   },

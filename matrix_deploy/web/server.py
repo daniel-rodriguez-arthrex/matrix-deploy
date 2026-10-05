@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -44,11 +44,11 @@ from ..env_settings import (
     protect_env_files,
     save_env_values,
 )
-from ..lab_status import collect_room_status
+from ..lab_status import collect_room_sfp, collect_room_status
 from .. import qa_lock, switch_status
 from ..preflight import run_preflight, summarize
 from ..jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
-from ..ssh_client import SSHError, SSHTarget, connect, redact, run_cisco_config_commands, run_cisco_show, sudo_prefix
+from ..ssh_client import KNOWN_HOSTS, SSHError, SSHTarget, connect, redact, run_cisco_config_commands, run_cisco_show, sudo_prefix
 from ..ssh_client import exec_command as ssh_exec_command
 from .. import webapp_builder
 from .tunnel import (
@@ -444,7 +444,8 @@ class JobManager:
         def run() -> None:
             job.emit({"type": "log", "message": f"Connecting to router {router_ip}:22 as {admin_username}...", "level": "info"})
             try:
-                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password), try_keys=False)
+                # Routers in other labs may run older Cisco IOS (SHA-1 only).
+                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password), try_keys=False, sha1="fallback")
             except SSHError as exc:
                 job.emit({"type": "log", "message": f"SSH connection failed: {exc}", "level": "error"})
                 job.finish()
@@ -872,16 +873,18 @@ class ConfigPatchRequest(BaseModel):
     max_concurrency: Optional[int] = None
 
 
+# Credential fields left blank use the value saved on this computer. Saved
+# passwords/tokens are never sent to the browser (see /api/setup "saved").
 class DownloadLatestRequest(BaseModel):
-    artifactory_email: str
-    artifactory_token: str
+    artifactory_email: Optional[str] = None
+    artifactory_token: Optional[str] = None
     cache_dir: Optional[str] = None
     branch: Optional[str] = None
 
 
 class TriggerBuildRequest(BaseModel):
-    jenkins_username: str
-    jenkins_token: str
+    jenkins_username: Optional[str] = None
+    jenkins_token: Optional[str] = None
 
 
 class SaveCredentialsRequest(BaseModel):
@@ -899,8 +902,8 @@ class SaveCredentialsRequest(BaseModel):
 
 
 class RouterApplyNatRequest(BaseModel):
-    router_admin_username: str
-    router_admin_password: str
+    router_admin_username: Optional[str] = None
+    router_admin_password: Optional[str] = None
     router_enable_password: Optional[str] = None
     # The (possibly hand-edited) command text from the UI. None = the full plan.
     commands: Optional[List[str]] = None
@@ -932,6 +935,11 @@ class RouterLiveRequest(BaseModel):
     router_admin_username: Optional[str] = None
     router_admin_password: Optional[str] = None
     router_enable_password: Optional[str] = None
+
+
+class SwitchesLiveRequest(BaseModel):
+    # Fiber tab: also read SFP light levels and the port error counters.
+    fiber: bool = False
 
 
 class FacilityImportRequest(BaseModel):
@@ -1030,6 +1038,17 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         """The user's saved SWU download folder, else the default."""
         saved = load_merged_env(app_config.path)[0].get("swu_download_dir")
         return Path(saved) if saved else DEFAULT_SWU_CACHE_DIR
+
+    def _saved(key: str) -> Optional[str]:
+        """A password/token saved on this computer for the active site (root
+        .env + the lab's .env), decrypted only here on the server."""
+        return load_merged_env(app_config.path)[1].get(key) or None
+
+    def _creds(req: Any) -> DeploymentCredentials:
+        """Room SSH/sudo passwords for a request: what was typed in the sidebar,
+        else the ones saved for this lab. The page never receives the saved ones."""
+        return DeploymentCredentials(ssh_password=req.ssh_password or _saved("ssh_password"),
+                                     sudo_password=req.sudo_password or _saved("sudo_password"))
 
     def _lab_env_path() -> Path:
         """Where the active site's SSH/sudo passwords are saved: its sibling
@@ -1167,7 +1186,8 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         if not password:
             raise HTTPException(status_code=400, detail="No router login saved for this lab. Add it under Settings > Edit saved credentials > Router, switches & Windows.")
         try:
-            client = connect(SSHTarget(host=app_config.connection.router_ip, port=22, username=user, password=password), try_keys=False)
+            # Routers in other labs may run older Cisco IOS (SHA-1 only).
+            client = connect(SSHTarget(host=app_config.connection.router_ip, port=22, username=user, password=password), try_keys=False, sha1="fallback")
         except SSHError as exc:
             raise HTTPException(status_code=502, detail=f"Couldn't log in to the router: {exc}")
         try:
@@ -1222,10 +1242,12 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         return ""
 
     @app.post("/api/switches/live")
-    def switches_live() -> Dict[str, Any]:
+    def switches_live(req: Optional[SwitchesLiveRequest] = None) -> Dict[str, Any]:
         """Read-only: link state and the devices (IP / MAC / vendor) on every
-        port of every switch in the facility config. Switches are reached
-        through the router's SSH forwards to their VLAN gateway IPs."""
+        port of every switch in the facility config, plus (``fiber``) SFP
+        light levels and error counters. Switches are reached through the
+        router's SSH forwards to their VLAN gateway IPs."""
+        fiber = bool(req and req.fiber)
         fac = app_config.facility or {}
         switches = fac.get("switches") or []
         if not switches:
@@ -1245,9 +1267,16 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             if not password:
                 return {**base, "error": "No switch password saved for this lab (Edit saved credentials > Router, switches & Windows)."}
             try:
-                data = switch_status.read_switch(app_config.connection.router_ip, fwd["outside_port"], user, password)
+                data = switch_status.read_switch(app_config.connection.router_ip, fwd["outside_port"], user, password, fiber=fiber)
             except SSHError as exc:
-                return {**base, "error": str(exc), "ssh_port": fwd["outside_port"]}
+                msg = str(exc)
+                if "host key changed" in msg:
+                    # Remove Fingerprint only covers rooms, so say how to clear a switch's key.
+                    msg = (f"Refused: {sw.get('name') or 'this switch'}'s SSH host key changed since this computer last "
+                           f"connected (router port {fwd['outside_port']}). If the switch was replaced or reset, delete the "
+                           f"[{app_config.connection.router_ip}]:{fwd['outside_port']} line in {KNOWN_HOSTS} and check again. "
+                           "Otherwise something may be impersonating it - don't connect, tell the team.")
+                return {**base, "error": msg, "ssh_port": fwd["outside_port"]}
             for p in data["ports"].values():
                 for d in p["devices"]:
                     d["label"] = _device_label(d["ip"])
@@ -1255,7 +1284,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(switches)) as pool:
             results = list(pool.map(lambda a: one(*a), enumerate(switches)))
-        return {"checked_at": time.time(), "switches": results}
+        return {"checked_at": time.time(), "fiber": fiber, "switches": results}
 
     # Uploaded facility zips waiting for the user to confirm the import. Only
     # the parsed result is kept (in memory), never the zip itself.
@@ -1370,11 +1399,15 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                     "Not allowed: " + "; ".join(rejected[:5]) + (" ..." if len(rejected) > 5 else "")))
             if not commands:
                 raise HTTPException(status_code=400, detail="No NAT rules to apply - pick at least one rule.")
+        user = req.router_admin_username or load_merged_env(app_config.path)[0].get("router_admin_username")
+        password = req.router_admin_password or _saved("router_admin_password")
+        if not user or not password:
+            raise HTTPException(status_code=400, detail="Enter the router SSH username and password (or save them under Settings > Edit saved credentials).")
         job = jobs.start_router_apply(
             app_config.connection.router_ip,
-            req.router_admin_username,
-            req.router_admin_password,
-            req.router_enable_password,
+            user,
+            password,
+            req.router_enable_password or _saved("router_enable_password"),
             commands,
         )
         return {"job_id": job.id}
@@ -1461,16 +1494,11 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                 "team": env.get("team", ""),
                 **{f: env.get(f, "") for f in PATH_FIELDS},
             },
-            "secrets": {
-                "ssh_password": secrets.get("ssh_password", ""),
-                "sudo_password": secrets.get("sudo_password", ""),
-                "artifactory_token": secrets.get("artifactory_token", ""),
-                "jenkins_token": secrets.get("jenkins_token", ""),
-                "router_admin_password": secrets.get("router_admin_password", ""),
-                "router_enable_password": secrets.get("router_enable_password", ""),
-                "windows_password": secrets.get("windows_password", ""),
-                "switch_password": secrets.get("switch_password", ""),
-            },
+            # Only whether each one is saved: the values stay on the server,
+            # which fills them in when a request leaves the field blank.
+            "saved": {k: bool(secrets.get(k)) for k in (
+                "ssh_password", "sudo_password", "artifactory_token", "jenkins_token", "router_admin_password",
+                "router_enable_password", "windows_password", "switch_password")},
             "facility": {k: (app_config.facility or {}).get(k) for k in ("site_code", "facility_name", "version", "source_file")}
             if app_config.facility else None,
             "qa": qa_status(),
@@ -1636,7 +1664,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         rooms = _rooms_by_numbers(req.room_numbers)
         if not req.swu_file:
             raise HTTPException(status_code=400, detail="An SWU file path is required")
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         job = jobs.start_deploy(
             app_config, rooms, creds,
             swu_file=Path(req.swu_file),
@@ -1649,7 +1677,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
     def start_webapp_deploy(req: WebAppDeployRequest) -> Dict[str, str]:
         require_qa()
         rooms = [] if req.build_only else _rooms_by_numbers(req.room_numbers)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         job = jobs.start_webapp_deploy(app_config, rooms, creds, req)
         return {"job_id": job.id}
 
@@ -1658,7 +1686,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         if req.action in QA_ACTIONS:
             require_qa()
         rooms = _rooms_by_numbers(req.room_numbers)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         params = {
             "custom_command": req.custom_command,
             "use_sudo": req.use_sudo,
@@ -1678,7 +1706,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         """Fetch a room's default NMS/admin password (from act-mfg-eeprom) so
         the UI can copy it to the clipboard when opening the demonstrator."""
         room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         deployer = Deployer(
             app_config, creds,
             log=lambda m, lvl: None,
@@ -1700,15 +1728,24 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         license). The UI calls this per room in parallel so cards fill in as
         each room answers."""
         room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         return collect_room_status(app_config, creds, room)
+
+    @app.post("/api/fiber/room")
+    def fiber_room(req: LabStatusRequest) -> Dict[str, Any]:
+        """Read-only: the device end of one room's fiber links (each NMS
+        device's SFP light levels and receive errors). The Fiber Test calls
+        this per room alongside the switch read."""
+        room = _one_room(req.room_number)
+        creds = _creds(req)
+        return collect_room_sfp(app_config, creds, room)
 
     @app.post("/api/jobs/stream-logs")
     def start_stream_logs(req: StreamLogsRequest) -> Dict[str, str]:
         room = _one_room(req.room_number)
         conn = app_config.connection
         service = {"matrix": conn.service_name, "nms": conn.nms_service_name}.get(req.service, req.service)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         job = jobs.start_log_stream(app_config, creds, room, service)
         return {"job_id": job.id}
 
@@ -1717,7 +1754,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         """Blocking (threadpool) load of a room's live config for the editor."""
         require_qa()
         room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         deployer = Deployer(
             app_config, creds,
             log=lambda m, lvl: None,
@@ -1733,7 +1770,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
     def config_deploy(req: ConfigDeployRequest) -> Dict[str, str]:
         require_qa()
         room = _one_room(req.room_number)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         job = jobs.start_config_deploy(app_config, room, creds, req.content)
         return {"job_id": job.id}
 
@@ -1743,7 +1780,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         whole-file copy, so room-specific values survive)."""
         require_qa()
         rooms = _rooms_by_numbers(req.room_numbers)
-        creds = DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password)
+        creds = _creds(req)
         job = jobs.start_config_patch(
             app_config, rooms, creds, [c.model_dump() for c in req.changes],
             sequential=req.sequential, max_concurrency=req.max_concurrency,
@@ -1763,7 +1800,11 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
     @app.post("/api/jobs/download-latest")
     def start_download_latest(req: DownloadLatestRequest) -> Dict[str, str]:
         require_qa()
-        creds = ArtifactoryCredentials(username=req.artifactory_email, token=req.artifactory_token)
+        email = req.artifactory_email or load_merged_env(app_config.path)[0].get("artifactory_email")
+        token = req.artifactory_token or _saved("artifactory_token")
+        if not email or not token:
+            raise HTTPException(status_code=400, detail="Enter your Artifactory email and token (or save them under Settings > Edit saved credentials).")
+        creds = ArtifactoryCredentials(username=email, token=token)
         build_path: Optional[str] = None
         branch_filter: Optional[str] = None
         label: Optional[str] = None
@@ -1793,7 +1834,11 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
     @app.post("/api/jobs/trigger-build")
     def start_trigger_build(req: TriggerBuildRequest) -> Dict[str, str]:
         require_qa()
-        creds = JenkinsCredentials(username=req.jenkins_username, token=req.jenkins_token)
+        user = req.jenkins_username or load_merged_env(app_config.path)[0].get("jenkins_username")
+        token = req.jenkins_token or _saved("jenkins_token")
+        if not user or not token:
+            raise HTTPException(status_code=400, detail="Enter your Jenkins username and token (or save them under Settings > Edit saved credentials).")
+        creds = JenkinsCredentials(username=user, token=token)
         job = jobs.start_trigger_build(creds)
         return {"job_id": job.id}
 
@@ -1824,9 +1869,10 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         app also puts its login screen on the display (it must be on screen
         to accept DevTools input and render screenshots)."""
         errors: List[str] = []
+        creds = _creds(req)
         deployer = Deployer(
             app_config,
-            DeploymentCredentials(ssh_password=req.ssh_password, sudo_password=req.sudo_password),
+            creds,
             log=lambda m, lvl: errors.append(m) if lvl == "error" else None,
             progress=lambda s, t: None,
             is_cancelled=lambda: False,
@@ -1839,7 +1885,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             if req.app == "admin":
                 if not deployer.show_admin_app(room, client):
                     raise HTTPException(status_code=502, detail=" ".join(errors) or "Could not bring up the admin login screen.")
-            elif req.sudo_password:
+            elif creds.sudo_password:
                 deployer.wake_display(room, client)  # best effort; DevTools works without it
         except BaseException:
             client.close()
@@ -2030,6 +2076,12 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         if api_token and not hmac.compare_digest(request.cookies.get(cookie, ""), api_token):
             return HTMLResponse(_SIGN_IN_PAGE, status_code=401)
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        # The app has no icon; answer browsers' automatic /favicon.ico request
+        # with "no content" instead of a 404 in the console log.
+        return Response(status_code=204)
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     # Outermost, so it also covers WebSockets and error responses.
