@@ -513,6 +513,9 @@ class Deployer:
             self._remove_staging(client, remote_staging)
         return exit_status == 0
 
+    def _webapp_staging_dir(self, room: Room) -> str:
+        return f"/home/{self.config.connection.ssh_username}/or{room.number}-webapp-upgrade"
+
     def _config_staging_path(self, room: Room) -> str:
         return f"/home/{self.config.connection.ssh_username}/or{room.number}.json"
 
@@ -763,14 +766,17 @@ class Deployer:
             self.log(str(exc), "error")
             return None
 
-        remote_tmp = f"/tmp/or{room.number}-full-journal.log"
+        # Home folder, owner-only (umask 077): the journal can hold secrets and
+        # a fixed /tmp name could be pre-created or read by other accounts.
+        remote_tmp = f"/home/{conn.ssh_username}/or{room.number}-full-journal.log"
         try:
             self._begin(2)
             prefix = self._read_sudo_prefix()
             self.log("Dumping journal to a temp file on the room...", "detail")
             dump_cmd = (
-                f"{prefix} journalctl --no-pager{since_arg} > {shlex.quote(remote_tmp)} 2>&1"
-            ).strip()
+                f"rm -f {shlex.quote(remote_tmp)}; "
+                f"(umask 077; {prefix} journalctl --no-pager{since_arg} > {shlex.quote(remote_tmp)} 2>&1)"
+            )
             run_command(client, dump_cmd)
             self._advance()  # dumped
 
@@ -1301,9 +1307,9 @@ class Deployer:
                 self.log("Could not determine the produced bundle path.", "error")
                 return None
 
-            # get-support runs as root, so the ZIP is root-owned; make it
-            # readable by the SSH user before pulling it down via SCP.
-            run_command(client, f"{self._sudo_prefix()} chmod a+r {shlex.quote(zip_remote)}")
+            # get-support runs as root, so the ZIP is root-owned; hand it to
+            # the SSH user (not chmod a+r: other accounts on the room could read it).
+            run_command(client, f"{self._sudo_prefix()} chown \"$(id -u)\" {shlex.quote(zip_remote)}")
 
             self.log(f"Downloading {zip_remote} ...", "detail")
             dest_dir = Path(dest_dir)
@@ -1314,8 +1320,6 @@ class Deployer:
             except Exception as exc:  # noqa: BLE001
                 self.log(f"Download failed: {exc}", "error")
                 return None
-            # Clean up the staging dir + archive on the room (root-owned; sudo).
-            run_command(client, f"{self._sudo_prefix()} rm -rf {shlex.quote(remote_dir)}")
             self._advance()
 
             # List what's inside so the operator can confirm completeness.
@@ -1333,6 +1337,12 @@ class Deployer:
             self.log(f"OR {room.number}: support bundle saved to {local}", "success")
             return local
         finally:
+            # Clean up the staging dir + archive on the room (root-owned; sudo),
+            # also when the download failed: the bundle holds room configs.
+            try:
+                run_command(client, f"{self._sudo_prefix()} rm -rf {shlex.quote(remote_dir)}")
+            except Exception:  # noqa: BLE001 - best effort
+                pass
             try:
                 client.close()
             except Exception:  # noqa: BLE001
@@ -2281,11 +2291,16 @@ class Deployer:
             self.log(str(exc), "error")
             return False
 
-        remote_tmp = f"/tmp/or{room.number}-webapp-upgrade"
+        # Staged in the home folder in a fresh owner-only dir: the files are
+        # copied into the app as root, so no other account may pre-create or
+        # write to this folder (a fixed /tmp name allowed both).
+        remote_tmp = self._webapp_staging_dir(room)
         try:
             self._begin(4)
             run_command(client, f"rm -rf {shlex.quote(remote_tmp)}")
-            run_command(client, f"mkdir -p {shlex.quote(remote_tmp)}")
+            if run_command(client, f"mkdir -m 700 {shlex.quote(remote_tmp)}") != 0:
+                self.log(f"Couldn't create a private staging folder {remote_tmp} on the room.", "error")
+                return False
 
             self.log("Uploading web assets...", "detail")
             upload_dir(client, str(local_web), f"{remote_tmp}/web", self.log)
@@ -2358,7 +2373,8 @@ class Deployer:
             sudo = self._sudo_prefix()
 
             cleanup_cmd = (
-                f"rm -rf /tmp/or{room.number}-* /tmp/v14-dist-fix-* /tmp/matrix-* "
+                f"rm -rf {shlex.quote(self._webapp_staging_dir(room))} "
+                f"/tmp/or{room.number}-* /tmp/v14-dist-fix-* /tmp/matrix-* "
                 f"{conn.remote_webapp_app_folder}/* && echo CLEANUP_OK"
             )
             cleanup_out: List[str] = []

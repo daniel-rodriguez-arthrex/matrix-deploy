@@ -747,7 +747,7 @@ function portsText(e, withSwitch = false) {
   return Object.entries(by).map(([sw, ps]) => `${withSwitch ? `${sw.replace(/^.*-/, "")} ` : ""}${[...new Set(ps)].sort((a, b) => a - b).join(" + ")}`).join(", ");
 }
 function kindBadge(kind) {
-  return `<span class="kind-badge k-${(kind || "other").toLowerCase()}">${KIND_LABEL[kind] || "Device"}</span>`;
+  return `<span class="kind-badge k-${escapeHtml(String(kind || "other").toLowerCase())}">${KIND_LABEL[kind] || "Device"}</span>`;
 }
 function entityRows(list, withSwitch) {
   const order = { PC: 0, EXTRON: 1, ENCODER: 2, DECODER: 3, ROUTER: 4, OTHER: 5 };

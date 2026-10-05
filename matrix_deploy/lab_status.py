@@ -86,7 +86,8 @@ def _nms_login(config: AppConfig, base_url: str, password: str, http: Any = requ
     auth = http.post(
         f"{base_url}/api/authentication",
         json={"username": conn.nms_username, "password": password},
-        verify=False, timeout=NMS_TIMEOUT,
+        # No redirects: a 307 would resend the password outside the pinned host.
+        verify=False, timeout=NMS_TIMEOUT, allow_redirects=False,
     )
     if auth.status_code != 200:
         raise NmsLoginError(f"NMS login returned HTTP {auth.status_code}")
@@ -109,7 +110,7 @@ def _nms_query(config: AppConfig, base_url: str, token: str, query: str, http: A
         f"{base_url}{config.connection.nms_graphql_path}",
         json={"query": query},
         headers={"Authorization": f"Bearer {token}"},
-        verify=False, timeout=NMS_TIMEOUT,
+        verify=False, timeout=NMS_TIMEOUT, allow_redirects=False,
     )
     if resp.status_code != 200:
         raise NmsError(f"NMS query returned HTTP {resp.status_code}")
