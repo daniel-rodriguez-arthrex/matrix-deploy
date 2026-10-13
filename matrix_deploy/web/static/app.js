@@ -8,6 +8,15 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
+// Scroll the tab content (.work) to show `node`. Not scrollIntoView: that also
+// scrolls the overflow:hidden .main and pushes the tabs bar off the screen.
+function scrollWorkTo(node, block = "start") {
+  const work = node.closest(".work");
+  if (!work) return;
+  const top = node.getBoundingClientRect().top - work.getBoundingClientRect().top;
+  const offset = block === "center" ? (work.clientHeight - node.offsetHeight) / 2 : 12;
+  work.scrollBy({ top: top - Math.max(0, offset), behavior: "smooth" });
+}
 
 /* ---------- Toasts + busy buttons ---------- */
 // Visible confirmation for saves etc. - the console may be collapsed or on
@@ -96,6 +105,10 @@ document.querySelectorAll("#tabs .tab").forEach((tab) => {
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     tab.classList.add("active");
     document.querySelector(`.tab-panel[data-panel="${tab.dataset.tab}"]`).classList.add("active");
+    // CSS hides the lab-router Setup banner on the Health Check tab (a single
+    // device check doesn't need the lab).
+    document.body.dataset.tab = tab.dataset.tab;
+    if (tab.dataset.tab === "health" && hcMode === "room") hcRoomCreds();
     closePortPanel();  // shared by the Network and Fiber Test tabs
   });
 });
@@ -309,7 +322,7 @@ function roomName(room) {
 }
 // Single-room pickers (Config, Tunnels) follow the most recently ticked room.
 function followSidebarRoom(n) {
-  for (const id of ["config-room", "tunnel-room"]) {
+  for (const id of ["config-room", "tunnel-room", "hc-room"]) {
     const sel = el(id);
     if (sel && sel.querySelector(`option[value="${n}"]`)) sel.value = String(n);
   }
@@ -324,6 +337,8 @@ async function loadRooms() {
   configRoom.innerHTML = "";
   const tunnelRoom = el("tunnel-room");
   tunnelRoom.innerHTML = "";
+  const hcRoom = el("hc-room");
+  hcRoom.innerHTML = "";
   for (const room of state.rooms) {
     const chip = document.createElement("label");
     chip.className = "room-chip";
@@ -335,7 +350,7 @@ async function loadRooms() {
       <span class="rid">${escapeHtml(room.room_id)}</span>
       <span class="room-links">
         <button type="button" class="room-link" data-open="nms" title="Open OR ${room.number}'s NMS Demonstrator (copies the login password)">NMS</button>
-        <button type="button" class="room-link" data-open="app" title="Open OR ${room.number}'s web app">App</button>
+        ${room.web_app_url ? `<button type="button" class="room-link" data-open="app" title="Open OR ${room.number}'s web app">App</button>` : ""}
       </span>
     `;
     container.appendChild(chip);
@@ -347,7 +362,10 @@ async function loadRooms() {
     opt.textContent = `${roomName(room)} \u00b7 ${room.room_id}`;
     configRoom.appendChild(opt);
     tunnelRoom.appendChild(opt.cloneNode(true));
+    hcRoom.appendChild(opt.cloneNode(true));
   }
+  // No lab configured (or no rooms): the Health Check's room choice is off.
+  hcSetMode(hcMode);
   state.configLoadedRoom = null;
   el("config-editor").value = "";
   el("config-status").textContent = "";
@@ -410,8 +428,8 @@ const NAT_COLUMNS = [
 const LIVE_LABEL = { ok: "forwarded", missing: "missing on router", conflict: "port used by something else" };
 // What stops working for a room when its forward is missing.
 const NAT_IMPACT = {
-  ssh: "this app can't SSH in (Facility check, deploys, logs)", swu: "software updates can't be uploaded",
-  api: "the Matrix API / certificate isn't reachable from outside", nms: "its NMS can't be checked or opened",
+  ssh: "this app can't SSH in (Facility check, deploys, logs)", swu: "its swupdate page isn't reachable from outside",
+  api: "its web app (App button) and Configure Web App can't reach it", nms: "its NMS can't be checked or opened (Facility check, Fiber Test)",
 };
 // Switch-style view: one row of "ports" per service, one cell per room,
 // coloured by what the live router says. Problems are spelled out above it.
@@ -438,7 +456,7 @@ function renderRouterBox(data, cols) {
       return `<span class="port fwd ${live || "unchecked"} ${f.source}" title="${escapeHtml(tip)}">${r.number}</span>`;
     }).join("");
     return `<div class="fwd-row"><span class="fwd-label"><b>${label}</b> <span class="vlan-meta">:${port} \u00b7 ${range}</span>` +
-      `${source ? `<span class="fwd-src ${source.source}">${source.source === "qa" ? "QA test" : "facility"}</span>` : ""}</span>${cells}</div>`;
+      `${source ? `<span class="fwd-src ${source.source}">${source.source === "qa" ? "QA only" : "facility"}</span>` : ""}</span>${cells}</div>`;
   });
   let summary;
   if (!routerLive) summary = `<span class="legend-hint">${total} planned forwards \u00b7 not compared with the live router yet - click <b>Check live router</b>.</span>`;
@@ -464,9 +482,10 @@ function renderRouterPorts() {
   el("router-ports-router").textContent = `${host}${data.router_ip} \u00b7 ${data.wan_interface}`;
   el("router-ports-hint").innerHTML =
     `Each room is reached through a port on <code>${escapeHtml(data.router_ip)}</code> (outside port = base + room number). ` +
-    (data.qa_port_forwards
-      ? "<b>API</b> is the facility forward every site gets; <b>SSH / SWU / NMS</b> are the extra QA test access on this lab's router."
-      : "This lab only has the <b>facility</b> (API) forward, no QA test access.") +
+    "<b>SSH</b> and <b>NMS</b> are the facility forwards every room needs for this tool to work" +
+    (data.qa_forwards_shown ? "; <b>SWU</b> and <b>API</b> are QA-only extras on this lab's router."
+      : data.qa_port_forwards ? ". The QA-only forwards (SWU, API) aren't checked or offered here for the Integration team."
+      : ". This lab has no QA forwards (SWU, API).") +
     " <b>Check live router</b> compares the plan with the router's real config (read-only). If a forward is missing, that room can't be reached for it.";
   renderRouterBox(data, cols);
   el("router-ports-thead").innerHTML =
@@ -481,14 +500,14 @@ function renderRouterPorts() {
         if (!f) return "<td></td>";
         const live = st[String(f.outside_port)];
         const tip = `${data.router_ip}:${f.outside_port} \u2192 ${r.room_id}:${f.inside_port}` +
-          (f.source === "qa" ? " (QA test access)" : " (facility)") + (live ? ` - ${LIVE_LABEL[live]}` : "");
+          (f.source === "qa" ? " (QA only)" : " (facility)") + (live ? ` - ${LIVE_LABEL[live]}` : "");
         return `<td><span class="port-chip ${f.source}${live ? " " + live : ""}" title="${escapeHtml(tip)}">${f.outside_port}</span></td>`;
       }).join("")}
     </tr>`).join("");
   const counts = Object.values(st).reduce((a, v) => ((a[v] = (a[v] || 0) + 1), a), {});
   el("router-ports-legend").innerHTML =
     `<span class="port-chip facility">facility</span>` +
-    (data.qa_port_forwards ? `<span class="port-chip qa">QA test</span>` : "") +
+    (data.qa_forwards_shown ? `<span class="port-chip qa">QA only</span>` : "") +
     (routerLive
       ? `<span class="sep"></span><span class="port-chip ok">${counts.ok || 0} forwarded</span>` +
         `<span class="port-chip missing">${counts.missing || 0} missing</span>` +
@@ -499,9 +518,127 @@ function renderRouterPorts() {
   el("router-other-count").textContent = String(other.length);
   el("router-other-tbody").innerHTML = other.map((o) =>
     `<tr><td><span class="port-chip">${o.outside_port}</span></td><td>${escapeHtml(o.label || "")}</td><td class="mono">${escapeHtml(o.inside_ip)}:${o.inside_port}</td><td>${o.proto}</td></tr>`).join("");
+  renderRouterPolicy();
   renderNatPicker(data, cols);
   renderSwitches(data.facility);
 }
+
+/* Router groups, rules & policies: object groups, the outbound access list,
+   the NAT overload policy, static routes, interfaces and hardening, from the
+   planner's router config (or the standard template) vs the live router.
+   Read-only; the fix commands are copy-only (Apply only sends static NAT). */
+const RP_LABEL = {
+  ok: "on the router", missing: "missing on the router", extra: "on the router, not in the plan",
+  unchecked: "not checked yet", info: "", warn: "not shown on the router", different: "differs from the plan",
+};
+const rpOpen = new Set(["access"]);
+function rpState(s) {
+  return s && RP_LABEL[s] ? `<span class="rp-state ${s}">${RP_LABEL[s]}</span>` : "";
+}
+function rpRow(status, main, raw, extra = "") {
+  return `<div class="rp-row ${status}"><span class="rp-dot"></span><span class="rp-main">${main}${extra}</span>` +
+    `<code class="rp-raw">${escapeHtml(raw || "")}</code>${rpState(status)}</div>`;
+}
+function rpSection(id, title, meta, body) {
+  return `<details class="net-other router-fold rp-sec" data-rp="${id}"${rpOpen.has(id) ? " open" : ""}>` +
+    `<summary class="subgroup-label">${title} <span class="badge subtle">${meta}</span></summary>${body}</details>`;
+}
+function rpTally(items, noun = "") {
+  const c = items.reduce((a, i) => ((a[i.status] = (a[i.status] || 0) + 1), a), {});
+  const parts = [`${items.length}${noun}`];
+  if (c.missing) parts.push(`${c.missing} missing`);
+  if (c.warn) parts.push(`${c.warn} to review`);
+  if (c.extra) parts.push(`${c.extra} extra`);
+  return parts.join(" \u00b7 ");
+}
+function renderRouterPolicy() {
+  const p = (routerLive && routerLive.policy) || (routerPorts && routerPorts.policy);
+  el("rp-card").hidden = !p;
+  if (!p) return;
+  const src = p.source || {};
+  el("rp-source").textContent = src.kind === "plan" ? `facility plan${src.version ? ` v${src.version}` : ""}` : "standard template";
+  el("rp-hint").innerHTML =
+    "What the router lets the rooms reach and how it's set up, besides the forwards above: the <b>access rules</b> that decide which outside " +
+    "addresses the rooms can reach (Bomgar, Datadog, external apps), the <b>groups</b> of addresses those rules use, the <b>NAT policy</b> " +
+    "that sends that traffic out, the <b>routes</b> to each room's subnet and the <b>hardening</b> settings. " +
+    (src.kind === "plan"
+      ? `Compared with the router config in this lab's facility planner export${src.file ? ` (<code>${escapeHtml(src.file)}</code>)` : ""}.`
+      : "Compared with the standard Matrix router template (Bomgar, Datadog, external apps rules, hardening). " +
+        (src.facility ? "Import this lab's facility zip again (Settings &gt; Facility config) to also compare its own routes and interfaces."
+          : "Routes and interfaces are shown as the router has them.")) +
+    " <b>Check live router</b> reads them (read-only).";
+  const items = [...p.groups.flatMap((g) => g.entries), ...p.acls.flatMap((a) => a.sections.flatMap((s) => s.entries)),
+    ...p.nat, ...p.routes, ...p.interfaces, ...p.hardening];
+  const n = (s) => items.filter((i) => i.status === s).length;
+  const planned = items.filter((i) => ["ok", "missing", "warn", "unchecked"].includes(i.status)).length;
+  const issues = [], notes = [];
+  for (const a of p.acls) for (const s of a.sections) for (const e of s.entries) {
+    if (e.status === "missing") issues.push(`${s.name}: "${e.plain}" isn't in ${a.name} - the rooms can't reach it.`);
+  }
+  for (const g of p.groups) {
+    if (g.status === "missing") issues.push(`Group ${g.name} is missing on the router - every rule that uses it matches nothing.`);
+    else for (const e of g.entries) if (e.status === "missing") issues.push(`Group ${g.name} is missing ${e.text}.`);
+  }
+  for (const r of p.nat) if (r.status === "missing") issues.push(`NAT policy missing (${r.text}) - the rooms can't reach anything outside the lab.`);
+  for (const r of p.routes) if (r.status === "missing") issues.push(`Route missing: ${r.label || r.text} (${r.text}).`);
+  for (const i of p.interfaces) if (i.status === "warn") notes.push(`${i.name}: ${i.notes.join("; ")}.`);
+  const hw = p.hardening.filter((h) => h.status === "warn");
+  if (hw.length) notes.push(`${hw.length} hardening setting${hw.length === 1 ? "" : "s"} not shown on the router: ${hw.map((h) => h.line).join(", ")}. Some IOS versions hide settings that are already the default; check with "show running-config all" before adding.`);
+  el("rp-summary").innerHTML = !p.checked
+    ? `<span class="legend-hint">${planned} planned items \u00b7 not compared with the live router yet - click <b>Check live router</b>.</span>`
+    : `<span>${n("ok")} of ${planned} planned items on the router</span>` +
+      (n("extra") ? `<span class="vlan-meta">${n("extra")} on the router that aren't in the plan</span>` : "") +
+      (issues.length ? `<span class="sum-issues">${issues.length} problem${issues.length === 1 ? "" : "s"}</span>` : "") +
+      (notes.length ? `<span class="sum-notes">${notes.length} to review</span>` : "") +
+      (!issues.length && !notes.length ? `<span class="ok-text">No problems</span>` : "");
+  el("rp-issues").hidden = !issues.length;
+  el("rp-issues").innerHTML = issues.map((t) => `<li>${escapeHtml(t)}</li>`).join("");
+
+  const access = p.nat.map((r) => rpRow(r.status, `<b>NAT policy:</b> ${escapeHtml(r.plain)}`, r.text)).join("") +
+    p.acls.map((a) => `<div class="rp-acl"><div class="rp-acl-head"><b>${escapeHtml(a.name)}</b>` +
+      `<span class="vlan-meta">${a.nat ? "access list the NAT policy uses: traffic not allowed here doesn't leave the lab" : "access list"}</span>` +
+      `${rpState(a.status)}</div>` +
+      a.sections.map((s) => `<div class="rp-sub">${escapeHtml(s.name)}</div>` +
+        s.entries.map((e) => rpRow(e.status, escapeHtml(e.plain), e.text)).join("")).join("") + "</div>").join("");
+  const aclEntries = [...p.nat, ...p.acls.flatMap((a) => a.sections.flatMap((s) => s.entries))];
+  const groups = p.groups.map((g) => `<div class="rp-group"><div class="rp-acl-head"><b>${escapeHtml(g.name)}</b>` +
+    `${g.description ? `<span class="vlan-meta">${escapeHtml(g.description)}</span>` : ""}${rpState(g.status)}</div>` +
+    (g.site_specific ? `<div class="hint">Different at every site, so its addresses aren't compared with the template.</div>` : "") +
+    `<div class="rp-chips">${g.entries.map((e) => `<span class="port-chip rp ${e.status}" title="${escapeHtml(RP_LABEL[e.status] || "")}">${escapeHtml(e.text)}</span>`).join("") ||
+      `<span class="legend-hint">${p.checked ? "no addresses" : "not read yet"}</span>`}</div></div>`).join("");
+  const routes = p.routes.length
+    ? `<div class="table-wrap"><table class="data-table net-table"><thead><tr><th></th><th>Network</th><th>Via</th><th>Distance</th><th>What</th><th></th></tr></thead><tbody>` +
+      p.routes.map((r) => `<tr class="rp-tr ${r.status}"><td><span class="rp-dot"></span></td><td class="mono">${escapeHtml(r.prefix)} ${escapeHtml(r.mask)}</td>` +
+        `<td class="mono">${escapeHtml(r.next_hop)}</td><td>${r.distance == null ? "-" : r.distance}</td><td>${escapeHtml(r.label || "")}</td><td>${rpState(r.status)}</td></tr>`).join("") +
+      "</tbody></table></div>"
+    : `<p class="legend-hint">${p.checked ? "No static routes on the router." : "Shown after Check live router."}</p>`;
+  const ifaces = p.interfaces.length
+    ? `<div class="table-wrap"><table class="data-table net-table"><thead><tr><th></th><th>Interface</th><th>Role</th><th>IP</th><th>Description</th><th></th></tr></thead><tbody>` +
+      p.interfaces.map((i) => `<tr class="rp-tr ${i.status}"><td><span class="rp-dot"></span></td><td class="mono">${escapeHtml(i.name)}</td><td>${escapeHtml(i.role)}${i.shutdown ? " (shut down)" : ""}</td>` +
+        `<td class="mono">${escapeHtml(i.ip || "-")}${i.mask ? ` ${escapeHtml(i.mask)}` : ""}</td><td>${escapeHtml(i.description || "-")}</td>` +
+        `<td>${i.notes.length ? `<span class="rp-state warn">${escapeHtml(i.notes.join("; "))}</span>` : rpState(i.status)}</td></tr>`).join("") +
+      "</tbody></table></div>"
+    : `<p class="legend-hint">${p.checked ? "No interfaces read." : "Shown after Check live router."}</p>`;
+  const hard = p.hardening.map((h) => rpRow(h.status, escapeHtml(h.label), h.line)).join("") ||
+    `<p class="legend-hint">The plan has no hardening lines.</p>`;
+  el("rp-body").innerHTML =
+    (notes.length ? `<ul class="switch-issues notes">${notes.map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : "") +
+    rpSection("access", "What the rooms can reach outside", rpTally(aclEntries, " rules"), access || `<p class="legend-hint">No access rules.</p>`) +
+    rpSection("groups", "Address groups", `${p.groups.length} groups`, groups || `<p class="legend-hint">No groups.</p>`) +
+    rpSection("routes", "Routes", rpTally(p.routes, " routes"), routes) +
+    rpSection("ifaces", "Interfaces", rpTally(p.interfaces, " interfaces"), ifaces) +
+    rpSection("hardening", "Hardening", rpTally(p.hardening, " settings"), hard);
+  el("rp-fix").hidden = !p.fix_script;
+  el("rp-fix-script").value = p.fix_script || "";
+}
+el("rp-body").addEventListener("toggle", (e) => {
+  const id = e.target.dataset && e.target.dataset.rp;
+  if (id) e.target.open ? rpOpen.add(id) : rpOpen.delete(id);
+}, true);
+el("rp-fix-copy").addEventListener("click", async () => {
+  const ok = await copyToClipboard(el("rp-fix-script").value);
+  el("rp-fix-status").textContent = ok ? "Copied to clipboard." : "Copy failed - select the text manually.";
+});
 
 /* Fix router config: pick which planned forwards to add; the Cisco block is
    built from the picks and can be edited by hand before copying/applying. */
@@ -584,6 +721,60 @@ el("router-ports-script").addEventListener("input", () => {
 el("nat-reset").addEventListener("click", () => {
   nat.edited = false;
   renderRouterPorts();
+});
+
+/* Undo: the NAT rules Apply to Router added/removed on this lab's router
+   (recorded server-side from the router's rules before/after each apply). */
+let natChanges = null;       // last /api/router/changes response
+function natLineLabel(line) {
+  const m = /^ip nat inside source static \S+ (\S+) (\d+) (?:interface )?\S+ (\d+)/.exec(line);
+  if (!m) return line;
+  const [, ip, inPort, outPort] = m;
+  for (const r of (routerPorts && routerPorts.rooms) || []) {
+    for (const [k, label] of NAT_COLUMNS) {
+      const f = r.forwards[k];
+      if (f && f.outside_port === Number(outPort)) return `OR ${r.number} ${label} (port ${outPort})`;
+    }
+  }
+  return `port ${outPort} \u2192 ${ip}:${inPort}`;
+}
+function renderNatUndo() {
+  const c = natChanges || { added: [], removed: [] };
+  const n = c.added.length + c.removed.length;
+  el("nat-undo").hidden = el("nat-undo-badge").hidden = !n;
+  el("nat-undo-badge").textContent = `${n} change${n === 1 ? "" : "s"} by this app`;
+  el("nat-undo-count").textContent = `${n} rule${n === 1 ? "" : "s"}`;
+  const list = (lines) => lines.map((l) => escapeHtml(natLineLabel(l))).join(", ");
+  el("nat-undo-hint").innerHTML =
+    (c.added.length ? `Added by this app: ${list(c.added)}. ` : "") +
+    (c.removed.length ? `Removed by this app: ${list(c.removed)}. ` : "") +
+    "<b>Load undo commands</b> puts the commands that leave the router as it was before into the box below; review them and use <b>Apply to Router</b>. " +
+    "<b>Forget</b> only clears this record (e.g. you already put the rules back by hand).";
+}
+async function loadRouterChanges() {
+  try {
+    const res = await fetch("/api/router/changes");
+    natChanges = res.ok ? await res.json() : null;
+  } catch { natChanges = null; }
+  renderNatUndo();
+}
+el("nat-undo-load").addEventListener("click", () => {
+  if (!natChanges || !natChanges.commands.length) return;
+  if (nat.edited && !confirm("Replace your edited commands with the undo commands?")) return;
+  el("router-ports-script").value = `configure terminal\n${natChanges.commands.join("\n")}\nend\nwrite memory\n`;
+  nat.edited = true;
+  el("nat-reset").hidden = false;
+  el("router-ports-status").textContent = "Undo commands loaded - review, tick the box below and Apply to Router.";
+  scrollWorkTo(el("router-ports-script"), "center");
+});
+el("nat-undo-forget").addEventListener("click", async () => {
+  if (!confirm("Forget the rules this app changed on this router?\n\nThe router isn't touched; you just won't be able to undo them from here.")) return;
+  try {
+    natChanges = await postJson("/api/router/changes/forget");
+    renderNatUndo();
+  } catch (e) {
+    toast(`Couldn't forget: ${e.message || e}`, "error");
+  }
 });
 
 // Port colours follow the facility planner: one hue per room VLAN.
@@ -986,6 +1177,7 @@ async function loadRouterPorts() {
   el("fiber-progress").textContent = "";
   renderRouterPorts();
   renderFiber();
+  loadRouterChanges();
 }
 async function checkLiveRouter({ quiet = false } = {}) {
   const btn = el("router-live-check");
@@ -1050,6 +1242,16 @@ const fiberKey = () => `md-fiber-last:${el("site-select").value || "default"}`;
 // Rx -5..-1.5 dBm. Below -22 dBm there's no light (link down), not a cabling reading.
 const FIBER_RANGE = { tx: [-4.5, -1.5], rx: [-5, -1.5], dark: -22 };
 const FIBER_MAX_LOSS = 3;  // dB, one direction of a link (sender's Tx - receiver's Rx)
+// The device end (Barco MNA encoders/decoders) uses Barco's own limits, same
+// as the Facility check (lab_status.SFP_LIMITS): 0 to -3.99 dBm ok, -4 to -6.99
+// warning, -7 or lower critical; below -26 dBm = no light.
+const BARCO_SFP = { warn: -4, bad: -7, dark: -26 };
+const barcoLevel = (v) => {
+  if (v == null || v < BARCO_SFP.dark) return null;
+  const x = Math.round(v * 100) / 100;
+  return x <= BARCO_SFP.bad ? "bad" : x <= BARCO_SFP.warn ? "warn" : "ok";
+};
+const BARCO_SFP_TEXT = "Barco limits: 0 to -3.99 dBm ok, -4 to -6.99 warning, -7 or lower critical";
 const outOfRange = (v, [lo, hi]) => v != null && v > FIBER_RANGE.dark && (v < lo || v > hi);
 const rangeText = ([lo, hi]) => `${lo} to ${hi} dBm`;
 // Error counters that point at the cable/optic. "Lost" (drops) is congestion, not the fiber.
@@ -1193,18 +1395,20 @@ function fiberFarEnd(S, n, p) {
   return { name: v ? vlanTitle(v) : "", kind: null, vlanOnly: true };
 }
 
-// The device end of one link: the lab's limits on its SFP, NMS alerts, receive errors.
+// The device end of one link: Barco's limits on its SFP, NMS alerts, receive errors.
 function fiberCheckDevice(L, prev) {
   const issues = [], notes = [];
   let level = "ok";
   const bump = (l) => { if (FIBER_LEVEL[l] > FIBER_LEVEL[level]) level = l; };
-  if (outOfRange(L.devRx, FIBER_RANGE.rx)) {
-    issues.push(`Device Rx ${dbm(L.devRx)} on ${L.iface} is outside the lab's range (${rangeText(FIBER_RANGE.rx)}) - check the cabling: clean both connectors, reseat, and test again.`);
-    bump("warn");
+  const sev = (l) => (l === "bad" ? "critical" : "warning");
+  const rxL = barcoLevel(L.devRx), txL = barcoLevel(L.devTx);
+  if (rxL === "warn" || rxL === "bad") {
+    issues.push(`Device Rx ${dbm(L.devRx)} on ${L.iface} is a Barco ${sev(rxL)} (${BARCO_SFP_TEXT}) - check the cabling: clean both connectors, reseat, and test again.`);
+    bump(rxL);
   }
-  if (outOfRange(L.devTx, FIBER_RANGE.tx)) {
-    issues.push(`Device Tx ${dbm(L.devTx)} on ${L.iface} is outside the lab's range (${rangeText(FIBER_RANGE.tx)}) - bad SFP in the device?`);
-    bump("warn");
+  if (txL === "warn" || txL === "bad") {
+    issues.push(`Device Tx ${dbm(L.devTx)} on ${L.iface} is a Barco ${sev(txL)} (${BARCO_SFP_TEXT}) - bad SFP in the device?`);
+    bump(txL);
   }
   // A short patch loses well under 3 dB; more in one direction = that strand of the pair.
   for (const [loss, other, dir] of [[L.lossToSw, L.lossToDev, "device \u2192 switch"], [L.lossToDev, L.lossToSw, "switch \u2192 device"]]) {
@@ -1274,11 +1478,12 @@ function fiberFarCell(r) {
   return `${r.far.kind ? `${kindBadge(r.far.kind)} ` : ""}<span class="${r.far.vlanOnly ? "legend-hint" : ""}">${escapeHtml(r.far.name)}</span>`;
 }
 const dash = '<span class="legend-hint">-</span>';
-// A device-end reading: amber when outside the lab's range, change since the last test.
-function devCell(v, range, delta = null) {
+// A device-end reading: amber / red by Barco's limits, change since the last test.
+const barcoCls = (v) => ({ warn: "note-text", bad: "issue-text" })[barcoLevel(v)] || "";
+function devCell(v, delta = null) {
   if (v == null) return dash;
   const change = rxChange(delta);
-  return `<span class="mono ${outOfRange(v, range) ? "note-text" : ""}" title="Lab range ${escapeHtml(rangeText(range))}">${v.toFixed(2)}</span>` +
+  return `<span class="mono ${barcoCls(v)}" title="${escapeHtml(BARCO_SFP_TEXT)}">${v.toFixed(2)}</span>` +
     (change ? ` <span class="vlan-meta">${escapeHtml(change.replace(" since the last test", ""))}</span>` : "");
 }
 const lossCell = (v) => (v == null ? dash : `<span class="mono">${v.toFixed(2)}</span>`);
@@ -1290,7 +1495,7 @@ function fiberTableRows(list) {
     const ddm = r.p.optic.ddm || {}, L = (r.links || [])[0];
     return `<tr class="${r.level === "bad" ? "has-issue" : ""}"><td class="mono">${r.n}</td><td class="fib-name">${fiberFarCell(r)}</td>` +
       `<td>${r.p.link ? escapeHtml(speedText(r.p.speed)) : '<span class="legend-hint">no link</span>'}</td>` +
-      `<td>${ddmCell(ddm.rx_power, r.rxDelta)}</td><td>${L ? devCell(L.devRx, FIBER_RANGE.rx, L.rxDelta) : dash}</td>` +
+      `<td>${ddmCell(ddm.rx_power, r.rxDelta)}</td><td>${L ? devCell(L.devRx, L.rxDelta) : dash}</td>` +
       `<td>${lossCell(L && L.lossToSw)}</td><td>${lossCell(L && L.lossToDev)}</td>` +
       `<td class="mono">${escapeHtml(fiberErrorsText(r.p))}</td><td>${fiberStatusCell(r)}</td></tr>`;
   }).join("");
@@ -1318,7 +1523,7 @@ function renderFiberRooms(m) {
       const errors = [swErr !== "0" && swErr !== "-" ? `switch ${swErr}` : "", L.rxErrors ? `device ${L.rxErrors}` : ""].filter(Boolean).join(" \u00b7 ") || "0";
       return `<tr class="${st.level === "bad" ? "has-issue" : ""}"><td class="fib-name" title="${escapeHtml(L.devId)}">${kindBadge(L.kind)} ${escapeHtml(L.name)}</td>` +
         `<td class="mono">${escapeHtml(L.iface)}</td><td class="mono">${L.r ? escapeHtml(`${L.r.sw.replace(/^.*-/, "")} ${L.r.n}`) : dash}</td>` +
-        `<td>${L.r ? ddmCell(L.r.p.optic.ddm && L.r.p.optic.ddm.rx_power, L.r.rxDelta) : dash}</td><td>${devCell(L.devRx, FIBER_RANGE.rx, L.rxDelta)}</td>` +
+        `<td>${L.r ? ddmCell(L.r.p.optic.ddm && L.r.p.optic.ddm.rx_power, L.r.rxDelta) : dash}</td><td>${devCell(L.devRx, L.rxDelta)}</td>` +
         `<td>${lossCell(L.lossToSw)}</td><td>${lossCell(L.lossToDev)}</td><td class="mono">${escapeHtml(errors)}</td><td>${fiberStatusCell(st)}</td></tr>`;
     }).join("");
     const where = home ? `${home.S.sw.name} \u00b7 VLAN ${home.v.tag}` : "";
@@ -1533,8 +1738,8 @@ function openFiberPortPanel(swIdx, n) {
         <div>${kindBadge(L.kind)} <strong>${escapeHtml(L.name)}</strong></div>
         <div class="vlan-meta mono">${escapeHtml([L.iface, L.ip, L.mac].filter(Boolean).join(" \u00b7 "))}</div>
         <div class="settings-grid pp-grid">
-          ${settingCell("Device Rx", [fmt(L.devRx, "dBm"), rxChange(L.rxDelta)].filter(Boolean).join(" \u00b7 "), outOfRange(L.devRx, FIBER_RANGE.rx) ? "note-text" : "")}
-          ${settingCell("Device Tx", fmt(L.devTx, "dBm"), outOfRange(L.devTx, FIBER_RANGE.tx) ? "note-text" : "")}
+          ${settingCell("Device Rx", [fmt(L.devRx, "dBm"), rxChange(L.rxDelta)].filter(Boolean).join(" \u00b7 "), barcoCls(L.devRx))}
+          ${settingCell("Device Tx", fmt(L.devTx, "dBm"), barcoCls(L.devTx))}
           ${settingCell("Loss device \u2192 switch", fmt(L.lossToSw, "dB"))}
           ${settingCell("Loss switch \u2192 device", fmt(L.lossToDev, "dB"))}
           ${settingCell("Device receive errors", String(L.rxErrors ?? "-"))}
@@ -1542,7 +1747,7 @@ function openFiberPortPanel(swIdx, n) {
         </div>
       </div>`;
     }
-    html += `<div class="vlan-meta pp-note">Lab range: Rx ${escapeHtml(rangeText(FIBER_RANGE.rx))}, Tx ${escapeHtml(rangeText(FIBER_RANGE.tx))}.</div>`;
+    html += `<div class="vlan-meta pp-note">Switch end: lab range Rx ${escapeHtml(rangeText(FIBER_RANGE.rx))}, Tx ${escapeHtml(rangeText(FIBER_RANGE.tx))}. Device end: ${escapeHtml(BARCO_SFP_TEXT)}.</div>`;
     html += r.issues.map((i) => `<div class="${r.level === "bad" ? "issue-text" : "note-text"}">${escapeHtml(i)}</div>`).join("");
     html += r.notes.map((i) => `<div class="legend-hint">${escapeHtml(i)}</div>`).join("");
   }
@@ -1792,7 +1997,8 @@ function fiberWorkbook() {
   const summary = [
     { cells: [`Fiber test - ${lsSiteName()}`], style: XLSX_STYLE.title },
     { cells: ["Tested", tested] },
-    { cells: ["Lab limits", `Rx ${rangeText(FIBER_RANGE.rx)}, Tx ${rangeText(FIBER_RANGE.tx)}, loss up to ${FIBER_MAX_LOSS} dB per direction`] },
+    { cells: ["Lab limits", `Switch Rx ${rangeText(FIBER_RANGE.rx)}, Tx ${rangeText(FIBER_RANGE.tx)}, loss up to ${FIBER_MAX_LOSS} dB per direction`] },
+    { cells: ["Device limits", BARCO_SFP_TEXT] },
     { cells: ["Device end", `Read from ${roomsRead} of ${roomsAll} rooms' NMS`] },
     { cells: [] },
     head(["Switch", "Fiber ports", "Linked", "Problems", "Warnings", "Unused SFPs", "Copper/DAC", "Status"]),
@@ -1889,8 +2095,9 @@ function renderFacilityPreview(d) {
     ${changes.length ? `<ul class="facility-changes">${changes.map((c) => `<li>${escapeHtml(c)}</li>`).join("")}</ul>` : ""}
     <div class="facility-targets">${targets.map(([v, label], i) =>
       `<label class="checkline"><input type="radio" name="facility-target" value="${escapeHtml(v)}" ${i ? "" : "checked"} /> <span>${label}</span></label>`).join("")}</div>
-    <label class="checkline"><input type="checkbox" id="facility-qa" ${!d.update || d.update.qa_port_forwards ? "checked" : ""} /> <span>This lab's router has the QA test forwards (SSH 200+n, SWU 300+n, NMS 11000+n)</span></label>
+    <label class="checkline"><input type="checkbox" id="facility-qa" ${!d.update || d.update.qa_port_forwards ? "checked" : ""} /> <span>QA lab: the router also has the QA-only forwards (SWU 300+n, API 10000+n). SSH 200+n and NMS 11000+n are always planned.</span></label>
     <p class="hint">Passwords are saved to this lab's <code>.env</code> on this computer only and never ship in the app zip. The uploaded zip itself isn't kept.</p>
+    <p class="hint warn-text"><b>Next step:</b> the zip has no router or switch passwords. Right after the import you'll be asked for them (required for Network, Fiber Test and Fix router config), and the lab router at ${escapeHtml(d.router.wan_ip)} has to be on the network.</p>
     <div class="action-grid">
       <button class="primary" id="facility-import">Import</button>
       <button class="ghost sm" id="facility-cancel">Cancel</button>
@@ -1917,6 +2124,8 @@ async function importFacility() {
     logTo(GENERAL_TAB, `Facility config imported: ${d.active_name} (${d.active}).`, "success");
     await loadProfiles();
     await Promise.all([loadRooms(), loadConnectionInfo(), loadRouterPorts(), loadSetup(true), loadPreflight()]);
+    // The planner zip never has the router/switch passwords: ask now.
+    if (missingRequired(state.setup).length) openCredsModal("router");
     autoCheckLabStatus();
   } catch (e) {
     done();
@@ -1973,7 +2182,7 @@ function cancelLabStatus() {
   setLabStatusButtons(false);
 }
 const LS_STATE = {
-  healthy: ["good", "Healthy"], warning: ["warn", "Needs attention"],
+  healthy: ["good", "Healthy"], warning: ["warn", "Needs attention"], critical: ["bad", "Critical"],
   error: ["bad", "Error"], unreachable: ["bad", "Unreachable"],
 };
 const LS_LICENSE = {
@@ -2065,7 +2274,12 @@ function lsServicePill(label, state) {
   if (!state) return lsPill("", `${label}: ?`);
   return state === "active" ? lsPill("good", label) : lsPill("bad", `${label}: ${state}`);
 }
-// Hottest device reading in the room; red if NMS raised any hardware alert.
+// Device readings graded by the server against Barco's MNA limits
+// (lab_status.py): "ok" / "warn" / "bad"; "dark" = no light on an SFP.
+const LS_GRADE_CLS = { warn: "warn", bad: "bad" };
+const lsFindings = (d) => (d.health && d.health.findings) || [];
+const lsWorst = (states) => (states.includes("bad") ? "bad" : states.includes("warn") ? "warn" : "ok");
+// Hottest device reading in the room; amber/red when any device is past Barco's limits.
 function lsHottestPill(r) {
   const withHealth = (r.devices || []).filter((d) => d.health);
   if (!withHealth.length) return "";
@@ -2074,10 +2288,12 @@ function lsHottestPill(r) {
     const t = Math.max(d.health.cpu_temp ?? -Infinity, d.health.fpga_temp ?? -Infinity);
     if (t > temp) { temp = t; hottest = d; }
   }
-  const alerts = withHealth.flatMap((d) => d.health.alerts.map((a) => `${d.model} ${d.id}: ${a}`));
-  if (!Number.isFinite(temp)) return alerts.length ? lsPill("bad", `${alerts.length} hardware alert${alerts.length > 1 ? "s" : ""}`, alerts.join("\n")) : "";
-  const title = `Hottest: ${hottest.model} ${hottest.id}` + (alerts.length ? `\n\n${alerts.join("\n")}` : "");
-  return lsPill(alerts.length ? "bad" : "", `Hottest ${temp}\u00b0C`, title);
+  const found = withHealth.flatMap((d) => lsFindings(d).map((f) => ({ ...f, text: `${d.model} ${d.id}: ${f.text}` })));
+  const level = LS_GRADE_CLS[lsWorst(found.map((f) => f.state))] || "";
+  const list = found.map((f) => f.text).join("\n");
+  if (!Number.isFinite(temp)) return found.length ? lsPill(level, `${found.length} hardware problem${found.length > 1 ? "s" : ""}`, list) : "";
+  const title = `Hottest: ${hottest.model} ${hottest.id}` + (list ? `\n\n${list}` : "");
+  return lsPill(level, `Hottest ${temp}\u00b0C`, title);
 }
 function lsCount(label, devices) {
   const online = lsOnline(devices);
@@ -2090,26 +2306,44 @@ function lsDeviceRows(r) {
     const ports = d.kind === "ENCODER" ? d.inputs : d.outputs;
     const used = ports.filter((p) => p.connected)
       .map((p) => escapeHtml(p.name) + (p.power && p.power !== "READY" ? ` <span class="mono">(${escapeHtml(p.power.toLowerCase())})</span>` : ""));
-    const h = d.health;
-    // One "needs attention" badge per device; the reasons are in its tooltip.
+    const h = d.health, found = lsFindings(d);
+    // One badge per device (critical / needs attention); the reasons are in its tooltip.
     const reasons = [
       d.licensed === false ? "Not licensed" : "",
       d.upgrade_required ? "Needs a firmware upgrade" : "",
-      ...(h ? h.alerts : []),
+      ...found.map((f) => f.text),
     ].filter(Boolean);
-    // Red only for the reading NMS actually flagged.
-    const flagged = (prefix) => h && h.alerts.some((a) => a.startsWith(prefix));
-    const reading = (text, bad) => `<span${bad ? ' class="ls-bad"' : ""}>${escapeHtml(text)}</span>`;
-    const temps = h ? [["CPU", h.cpu_temp], ["FPGA", h.fpga_temp]].filter(([, t]) => t != null)
-      .map(([k, t]) => reading(`${k} ${t}\u00b0C`, flagged(`${k} temp`))).join(" \u00b7 ") : "";
+    const level = lsWorst(found.map((f) => f.state));
+    // Each reading coloured by its own grade; the limit is in its tooltip.
+    const reading = (text, g, title = "") => {
+      const cls = g && g.state === "bad" ? "ls-bad" : g && g.state === "warn" ? "ls-warn" : "";
+      return `<span${cls ? ` class="${cls}"` : ""}${title ? ` title="${escapeHtml(title)}"` : ""}>${escapeHtml(text)}</span>`;
+    };
+    const tg = (h && h.temp_grades) || {};
+    const temps = h ? [["CPU", h.cpu_temp, tg.cpu], ["FPGA", h.fpga_temp, tg.fpga]].filter(([, t]) => t != null)
+      .map(([k, t, g]) => reading(`${k} ${t}\u00b0C`, g, g ? g.limit : "")).join(" \u00b7 ") : "";
     const fans = h && h.fans.length
-      ? `<div class="mono">Fan${h.fans.length > 1 ? "s" : ""} ${h.fans.map((f) => reading(`${f.rpm ?? "?"} rpm`, f.alerts.length)).join(" / ")}</div>`
+      ? `<div class="mono">Fan${h.fans.length > 1 ? "s" : ""} ${h.fans.map((f) => {
+        const g = f.grade;
+        return reading(`${f.rpm ?? "?"} rpm${g ? ` (${g.percent}%)` : ""}`, g,
+          g ? `${f.name}: ${g.limit}` : `${f.name}${f.pwm != null ? `: PWM ${f.pwm} % (not graded)` : ""}`);
+      }).join(" / ")}</div>`
       : "";
-    const healthCell = h ? `${temps || "-"}${fans}` : '<span class="mono">n/a</span>';
+    // Weakest light per direction across the device's SFPs (unused ports skipped).
+    const lit = ((h && h.sfp) || []);
+    const weakest = (key) => lit.filter((p) => p[key] != null && p[`${key}_grade`] && p[`${key}_grade`].state !== "dark")
+      .sort((a, b) => a[key] - b[key])[0];
+    const sfpTitle = lit.map((p) => `${p.name}: Rx ${p.rx == null ? "-" : p.rx.toFixed(2)} / Tx ${p.tx == null ? "-" : p.tx.toFixed(2)} dBm`).join("\n") +
+      "\n\nBarco limits: 0 to -3.99 dBm ok, -4 to -6.99 warning, -7 or lower critical";
+    const light = ["rx", "tx"].map((k) => [k, weakest(k)]).filter(([, p]) => p)
+      .map(([k, p]) => reading(`${k === "rx" ? "Rx" : "Tx"} ${p[k].toFixed(1)}`, p[`${k}_grade`], sfpTitle));
+    const sfp = light.length ? `<div class="mono">${light.join(" / ")} dBm</div>` : "";
+    const healthCell = h ? `${temps || "-"}${fans}${sfp}` : '<span class="mono">n/a</span>';
+    const badge = !reasons.length ? ""
+      : " " + lsPill(level === "bad" ? "bad" : "warn", level === "bad" ? "critical" : "needs attention", reasons.join("\n"));
     return `<tr><td>${escapeHtml(d.kind.charAt(0) + d.kind.slice(1).toLowerCase())}</td>` +
       `<td>${escapeHtml(d.model || "")}<div class="mono">${escapeHtml(d.id || "")}${d.firmware ? ` &middot; fw ${escapeHtml(d.firmware)}` : ""}</div></td>` +
-      `<td>${d.state === "ONLINE" ? lsPill("good", "online") : lsPill("bad", d.state.toLowerCase())}` +
-      `${reasons.length ? " " + lsPill("warn", "needs attention", reasons.join("\n")) : ""}</td>` +
+      `<td>${d.state === "ONLINE" ? lsPill("good", "online") : lsPill("bad", d.state.toLowerCase())}${badge}</td>` +
       `<td>${healthCell}</td>` +
       `<td>${used.length ? used.join("<br>") : '<span class="mono">nothing connected</span>'}</td></tr>`;
   }).join("");
@@ -2143,11 +2377,12 @@ function lsCard(room) {
         `<div class="ls-count"><span class="k">Displays</span><span class="v">${displays.length}<small> connected</small></span></div></div>`;
       if (r.devices.length) {
         body += `<details><summary>Devices (${r.devices.length})</summary><div class="table-wrap"><table class="ls-devices">` +
-          `<thead><tr><th>Type</th><th>Model / ID</th><th>State</th><th>Temp / Fans</th><th>Sources / Displays</th></tr></thead>` +
+          `<thead><tr><th>Type</th><th>Model / ID</th><th>State</th><th>Temp / Fans / Fiber</th><th>Sources / Displays</th></tr></thead>` +
           `<tbody>${lsDeviceRows(r)}</tbody></table></div></details>`;
       }
     }
-    if (r.issues && r.issues.length) body += `<ul class="ls-issues">${r.issues.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`;
+    if (r.issues && r.issues.length) body += `<ul class="ls-issues">${r.issues.map((i) => `<li${/\(critical\)$/.test(i) ? ' class="crit"' : ""}>${escapeHtml(i)}</li>`).join("")}</ul>`;
+    if (r.notes && r.notes.length) body += `<ul class="ls-notes">${r.notes.map((i) => `<li>${escapeHtml(i)}</li>`).join("")}</ul>`;
   }
   const changed = changes && changes.length ? lsPill("info", `${changes.length} change${changes.length === 1 ? "" : "s"}`, changes.join("\n")) : "";
   return `<div class="card ls-card ${busy ? "" : (r && r.state) || ""}">` +
@@ -2281,12 +2516,13 @@ function lsExportMarkdown() {
       r.nms && r.nms.ok ? `${lsOnline(enc)}/${enc.length}` : "", r.nms && r.nms.ok ? `${lsOnline(dec)}/${dec.length}` : "",
       r.nms && r.nms.ok ? lsDisplays(r).length : ""]));
   }
-  const noted = rows.filter(([rm, r]) => (r.issues || []).length || (labStatus.changes[rm.number] || []).length);
+  const noted = rows.filter(([rm, r]) => (r.issues || []).length || (r.notes || []).length || (labStatus.changes[rm.number] || []).length);
   out.push("", "## Issues and changes", "");
   if (!noted.length) out.push("No issues or changes.");
   for (const [rm, r] of noted) {
     out.push(`### ${roomName(rm)} (${(LS_STATE[r.state] || ["", r.state])[1]})`, "");
     for (const i of r.issues || []) out.push(`- ${i}`);
+    for (const i of r.notes || []) out.push(`- Note: ${i}`);
     const c = labStatus.changes[rm.number] || [];
     if (c.length) out.push(`- Changed since ${new Date(labStatus.since[rm.number]).toLocaleString()}: ${c.join("; ")}`);
     out.push("");
@@ -2295,7 +2531,7 @@ function lsExportMarkdown() {
     row(Array(9).fill("---")));
   for (const [rm, r] of rows) {
     for (const d of r.devices || []) {
-      const reasons = [d.licensed === false ? "not licensed" : "", d.upgrade_required ? "needs firmware upgrade" : "", ...(d.health ? d.health.alerts : [])].filter(Boolean);
+      const reasons = [d.licensed === false ? "not licensed" : "", d.upgrade_required ? "needs firmware upgrade" : "", ...lsFindings(d).map((f) => f.text)].filter(Boolean);
       out.push(row([`OR ${rm.number}`, d.kind, d.model, d.id, d.state, d.firmware, ...lsTemps(d), reasons.join("; ")]));
     }
   }
@@ -2304,16 +2540,17 @@ function lsExportMarkdown() {
 function lsExportCsv() {
   const q = csvCell;
   const head = ["room", "room_state", "software_version", "software_build", "uptime", "matrix_api", "barco_nms", "license",
-    "device_type", "model", "device_id", "device_state", "firmware", "licensed", "cpu_temp_c", "fpga_temp_c", "device_alerts", "room_issues"];
+    "device_type", "model", "device_id", "device_state", "firmware", "licensed", "cpu_temp_c", "fpga_temp_c", "device_health", "device_problems", "room_issues"];
   const lines = [head.join(",")];
   for (const [rm, r] of lsChecked()) {
     const sw = r.software || {}, svc = r.services || {};
     const base = [rm.number, r.state, sw.version, sw.build, (r.ssh || {}).uptime, svc.matrix_api, svc.nms, r.license ? r.license.state : ""];
     const issues = (r.issues || []).join("; ");
     const devs = r.devices || [];
-    if (!devs.length) lines.push([...base, ...Array(9).fill(""), issues].map(q).join(","));
+    if (!devs.length) lines.push([...base, ...Array(10).fill(""), issues].map(q).join(","));
     for (const d of devs) {
-      lines.push([...base, d.kind, d.model, d.id, d.state, d.firmware, d.licensed, ...lsTemps(d), (d.health ? d.health.alerts : []).join("; "), issues].map(q).join(","));
+      lines.push([...base, d.kind, d.model, d.id, d.state, d.firmware, d.licensed, ...lsTemps(d), (d.health ? d.health.state : ""),
+        lsFindings(d).map((f) => f.text).join("; "), issues].map(q).join(","));
     }
   }
   lsDownload(lsExportName("csv"), lines.join("\r\n") + "\r\n", "text/csv");
@@ -2326,6 +2563,298 @@ el("ls-check-selected").addEventListener("click", () => runLabStatus(selectedRoo
 function autoCheckLabStatus() {
   if (state.rooms.length && hasCred("ssh-password", "ssh_password")) runLabStatus(state.rooms.map((r) => r.number));
 }
+
+/* ---------- Health Check (one device's hardware, read-only) ---------- */
+// A facility room (sidebar/saved lab passwords) or any device by address
+// (login typed here, used for this request only, never saved).
+// Nothing is picked until the user says what they're checking (step 1).
+let hcMode = null;
+let hcResult = null;
+let hcBusy = false;
+const HC_RUN_HTML = el("hc-run").innerHTML;
+const HC_STATE = { healthy: ["good", "Healthy"], warning: ["warn", "Needs attention"], error: ["bad", "Problems found"], unreachable: ["bad", "Couldn't connect"] };
+const HC_ITEM = { ok: ["good", "OK"], warn: ["warn", "Warning"], bad: ["bad", "Problem"], info: ["", "Info"] };
+function hcSetMode(mode) {
+  if (mode === "room" && !state.rooms.length) mode = null;
+  hcMode = mode;
+  document.querySelectorAll("#hc-mode .hc-choice").forEach((b) => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+    if (b.dataset.mode === "room") {
+      b.disabled = !state.rooms.length;
+      b.title = state.rooms.length ? "" : "No lab is set up on this computer - use one of the other two.";
+    }
+  });
+  el("hc-room-fields").hidden = mode !== "room";
+  el("hc-device-fields").hidden = mode !== "device";
+  el("hc-windows-fields").hidden = mode !== "windows";
+  el("hc-run-row").hidden = mode !== "room" && mode !== "device";
+  if (mode === "room") hcRoomCreds();
+  if (mode === "device" && !el("hc-host").value) el("hc-host").focus();
+}
+document.querySelectorAll("#hc-mode .hc-choice").forEach((b) => b.addEventListener("click", () => hcSetMode(b.dataset.mode)));
+// Room mode uses the sidebar/saved lab passwords: say up front whether they're there.
+function hcRoomCreds() {
+  const box = el("hc-room-creds");
+  if (!state.setup) { box.innerHTML = ""; return; }
+  const ssh = hasCred("ssh-password", "ssh_password"), sudo = hasCred("sudo-password", "sudo_password");
+  box.className = `hc-creds ${ssh ? (sudo ? "good" : "warn") : "bad"}`;
+  box.innerHTML = !ssh
+    ? "<b>No SSH password for this lab.</b> Enter it under <b>Credentials</b> in the sidebar (or Settings &rarr; Edit saved credentials) first."
+    : sudo ? "\u2714 Lab login found. Ready to run."
+      : "\u2714 Lab login found. <b>No sudo password</b>, so a few disk checks will be skipped (enter it in the sidebar for the full check).";
+}
+for (const id of ["ssh-password", "sudo-password"]) el(id).addEventListener("input", () => { if (hcMode === "room") hcRoomCreds(); });
+el("hc-copy-cmd").addEventListener("click", async () => {
+  const ok = await copyToClipboard(el("hc-cmd").textContent);
+  toast(ok ? "Command copied. Paste it into the BeyondTrust Shell." : "Couldn't copy - select the command and copy it by hand.", ok ? "success" : "warning");
+});
+// Next step for each check, worst first, each once (the server sends this as
+// "actions"; older reports only have it per item).
+function hcActions(r) {
+  if (Array.isArray(r.actions)) return r.actions;
+  const out = new Map();
+  for (const level of ["bad", "warn"]) for (const s of (r.sections || []).filter(hcIsHealth)) for (const it of s.items) {
+    if (it.state !== level || !it.action) continue;
+    if (!out.has(it.action)) out.set(it.action, { text: it.action, state: level, because: [] });
+    out.get(it.action).because.push(it.label);
+  }
+  return [...out.values()];
+}
+// Drive and memory health scores (0-100): the headline of every report,
+// one full-width row each (no side-by-side cards).
+function hcScoresHtml(r) {
+  const scores = r.scores ? [r.scores.disk, r.scores.memory].filter(Boolean) : [];
+  if (!scores.length) return "";
+  return `<div class="hc-health">${scores.map((s) => {
+    const list = s.reasons.length ? `<ul>${s.reasons.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>` : `<div class="hc-score-none">No problems found.</div>`;
+    const missing = (s.missing || []).length ? `<div class="hc-score-missing">Not checked: ${escapeHtml(s.missing.join("; "))}</div>` : "";
+    // Key numbers (life left, power-on time, cycles...) as bold labelled values.
+    const stats = (s.stats || []).length ? `<div class="hc-stats">${s.stats.map((x) =>
+      `<div class="hc-stat ${x.state}"><span>${escapeHtml(x.label)}</span><b>${escapeHtml(x.value)}</b>` +
+      `${x.hint ? `<em>${escapeHtml(x.hint)}</em>` : ""}</div>`).join("")}</div>` : "";
+    return `<div class="hc-hrow ${s.state}"><div class="hc-hhead"><span class="hc-hname">${escapeHtml(s.title)}</span>` +
+      `<span class="hc-hscore">${s.score}<small>/100</small> <b>${escapeHtml(s.grade)}</b></span>` +
+      `<span class="hc-bar"><i style="width:${Math.max(0, Math.min(100, Number(s.score) || 0))}%"></i></span></div>` +
+      `<div class="hc-hbody"><div class="hc-score-facts">${escapeHtml((s.facts || []).join(" \u00b7 "))}</div>${stats}${list}${missing}</div></div>`;
+  }).join("")}</div>`;
+}
+// What this device is (name, model, serial, IP, software, CPU, memory, disk):
+// first thing on the report. Label/value pairs that wrap to fit the width.
+function hcDeviceHtml(r) {
+  if (!(r.device || []).length) return "";
+  return `<div class="hc-device"><div class="hc-device-title">Device</div><div class="hc-device-grid">${r.device.map((d) =>
+    `<div class="hc-dv"><span>${escapeHtml(d.label)}</span>${escapeHtml(d.value)}</div>`).join("")}</div></div>`;
+}
+// Free space, free memory, network link: easy to read, but not part of the scores.
+function hcGlanceHtml(r) {
+  if (!(r.glance || []).length) return "";
+  return `<div class="hc-head">At a glance</div><div class="hc-rows">${r.glance.map((g) => hcRowHtml(g.label, g.value, g.state)).join("")}</div>`;
+}
+// One check as a plain row (dot, label, value): wraps instead of scrolling sideways.
+function hcRowHtml(label, value, state, extra = "") {
+  return `<div class="hc-row ${state}"><span class="hc-dot"></span><div class="hc-row-label">${escapeHtml(label)}</div>` +
+    `<div class="hc-row-value">${escapeHtml(value)}${extra}</div></div>`;
+}
+const HC_HEALTH_IDS = ["disk", "mem", "cpu", "net"];
+const hcIsHealth = (s) => (s.group ? s.group === "health" : HC_HEALTH_IDS.includes(s.id));
+function hcSectionHtml(s) {
+  const [scls, slabel] = HC_ITEM[s.state] || ["", s.state];
+  const rows = s.items.map((it) => {
+    const detail = it.detail ? `<details class="hc-detail"><summary>details</summary><pre>${escapeHtml(it.detail)}</pre></details>` : "";
+    const todo = it.action ? `<div class="hc-item-todo">What to do: ${escapeHtml(it.action)}</div>` : "";
+    return hcRowHtml(it.label, it.value, it.state, todo + detail);
+  }).join("");
+  const raw = s.raw ? `<details class="hc-detail"><summary>Raw output</summary><pre class="hc-raw">${escapeHtml(s.raw)}</pre></details>` : "";
+  return `<div class="hc-sec"><div class="hc-sec-title">${escapeHtml(s.title)} ${s.state === "info" ? "" : lsPill(scls, slabel)}</div><div class="hc-rows">${rows}</div>${raw}</div>`;
+}
+function hcRenderReport() {
+  const r = hcResult;
+  if (!r) { el("hc-report").innerHTML = ""; return; }
+  const [cls, label] = HC_STATE[r.state] || ["", r.state];
+  const when = r.checked_at ? new Date(r.checked_at).toLocaleString() : "";
+  const win = r.platform === "windows";
+  const addr = r.target.port ? `${r.target.host}:${r.target.port}` : r.target.host;
+  const sub = [!String(r.label).includes(addr) && addr, win && "Windows (MatrixHealthCheck.ps1)",
+    when && `checked ${when}`, r.duration_s != null && `${r.duration_s}s`,
+    (r.sections || []).length && (win ? (r.sudo ? "as Administrator" : "not as Administrator") : (r.sudo ? "as root" : "without root"))]
+    .filter(Boolean).join(" \u00b7 ");
+  const items = (r.sections || []).filter(hcIsHealth).flatMap((s) => s.items);
+  const nBad = items.filter((it) => it.state === "bad").length, nWarn = items.filter((it) => it.state === "warn").length;
+  // A failed connection has no sections: its reason is in issues.
+  const failed = !(r.sections || []).length;
+  const verdict = failed ? "Couldn't check this device"
+    : r.state === "healthy" ? "Healthy - no hardware problems found"
+      : r.state === "warning" ? `Needs attention - ${nWarn} warning${nWarn === 1 ? "" : "s"}, nothing serious`
+        : `Problems found - ${nBad} problem${nBad === 1 ? "" : "s"}${nWarn ? `, ${nWarn} warning${nWarn === 1 ? "" : "s"}` : ""}`;
+  const actions = failed
+    ? [{ state: "bad", because: r.issues || [], text: hcMode === "room" || r.target.port === 0
+      ? "Check that the device is switched on and connected, then try again."
+      : "Check the IP address, username and password, and that the device is switched on and connected to the network. Then try again." }]
+    : hcActions(r);
+  let html = `<div class="card hc-summary hc-doc ${failed ? "error" : r.state}">` +
+    `<div class="hc-print-head">Device health report - Matrix Facility Manager - printed ${escapeHtml(new Date().toLocaleString())}</div>` +
+    `<div class="hc-verdict-row"><div><div class="hc-verdict">${escapeHtml(verdict)}</div><div class="ls-sub">${escapeHtml(r.label)} \u00b7 ${escapeHtml(sub)}</div></div>` +
+    `<span class="hc-verdict-actions">${failed ? "" : `<button class="action" data-hc="pdf"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M9 15h6M9 18h4"/></svg> Save as PDF</button>`}` +
+    `${failed ? "" : `<button class="action" data-hc="export"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> Save report for a ticket</button>`}</span></div>`;
+  html += hcDeviceHtml(r) + hcScoresHtml(r) + hcGlanceHtml(r);
+  if (actions.length) {
+    html += `<div class="hc-todo"><div class="hc-todo-head">What to do</div><ol>${actions.map((a) =>
+      `<li class="${a.state}"><b>${escapeHtml(a.text)}</b>${a.because.length ? `<div class="hc-because">${failed ? "" : "Because: "}${escapeHtml(a.because.join("; "))}</div>` : ""}</li>`).join("")}</ol></div>`;
+  } else {
+    html += `<div class="hc-todo good"><div class="hc-todo-head">Nothing to do</div><p>If the device still misbehaves, the cause is probably not its hardware (check the software, the network or the logs).</p></div>`;
+  }
+  for (const n of r.notes || []) html += `<div class="hc-note-line">${escapeHtml(n)}</div>`;
+  if (!failed) {
+    // Hardware first; software and system info folded away (not part of the result).
+    html += `<div class="hc-head">Health details</div>` + r.sections.filter(hcIsHealth).map(hcSectionHtml).join("");
+    const other = r.sections.filter((s) => !hcIsHealth(s));
+    if (other.length) {
+      html += `<details class="hc-other"><summary>Other details (software and system info, not part of the health result)</summary>` +
+        other.map(hcSectionHtml).join("") + `</details>`;
+    }
+  }
+  html += `</div>`;
+  el("hc-report").innerHTML = html;
+  // The verdict is below the form: bring it into view.
+  scrollWorkTo(el("hc-report"));
+}
+el("hc-report").addEventListener("click", (e) => {
+  if (e.target.closest('[data-hc="export"]')) hcExportMarkdown();
+  if (e.target.closest('[data-hc="pdf"]')) hcSavePdf();
+});
+// "Save as PDF": the browser's print dialog (pick "Save as PDF") showing only
+// the report (style.css body.hc-printing), light colours, every detail open.
+function hcSavePdf() {
+  const r = hcResult;
+  if (!r) return;
+  const report = el("hc-report");
+  const closed = [...report.querySelectorAll("details:not([open])")];
+  closed.forEach((d) => (d.open = true));
+  const theme = document.documentElement.getAttribute("data-theme");
+  const title = document.title;
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  // The PDF's default file name.
+  document.title = `health-${String(r.label).replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase()}-` +
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  document.documentElement.setAttribute("data-theme", "light");
+  document.body.classList.add("hc-printing");
+  const restore = () => {
+    document.body.classList.remove("hc-printing");
+    document.documentElement.setAttribute("data-theme", theme || "light");
+    document.title = title;
+    closed.forEach((x) => (x.open = false));
+    window.removeEventListener("afterprint", restore);
+  };
+  window.addEventListener("afterprint", restore);
+  logTo(GENERAL_TAB, `Health check ${r.label}: choose "Save as PDF" in the print dialog.`, "info");
+  window.print();
+}
+async function runHealthCheck() {
+  if (hcBusy) return;
+  let body, what;
+  if (hcMode === "room") {
+    const n = Number(el("hc-room").value);
+    if (!n) { toast("Pick a room first.", "warning"); return; }
+    if (!hasCred("ssh-password", "ssh_password")) { hcRoomCreds(); toast("Enter the lab's SSH password in the sidebar first.", "warning"); el("ssh-password").focus(); return; }
+    body = { room_number: n, ...credentials() };
+    what = `OR ${n}`;
+  } else if (hcMode === "device") {
+    const host = el("hc-host").value.trim(), username = el("hc-user").value.trim(), ssh_password = el("hc-pass").value;
+    const port = Number(el("hc-port").value) || 22;
+    const missing = [!host && "IP address", !username && "username", !ssh_password && "password"].filter(Boolean);
+    if (missing.length) { toast(`Enter the device's ${missing.join(", ")}.`, "warning"); (!host ? el("hc-host") : !username ? el("hc-user") : el("hc-pass")).focus(); return; }
+    body = { host, port, username, ssh_password, sudo_password: el("hc-sudo").value || null };
+    what = `${username}@${host}${port !== 22 ? `:${port}` : ""}`;
+  } else {
+    return;
+  }
+  hcBusy = true;
+  const btn = el("hc-run");
+  btn.disabled = true;
+  btn.innerHTML = `<span class="btn-spin"></span> Checking\u2026 (up to a minute)`;
+  el("hc-status").textContent = "";
+  el("hc-report").innerHTML = "";
+  logTo(GENERAL_TAB, `Health check: ${what}\u2026`, "info");
+  try {
+    const res = await fetch("/api/health-check", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const d = await res.json().catch(() => ({ detail: res.statusText }));
+    if (!res.ok) throw new Error(d.detail || res.status);
+    hcResult = d;
+    hcRenderReport();
+    const [, label] = HC_STATE[d.state] || ["", d.state];
+    el("hc-updated").textContent = `checked ${new Date().toLocaleTimeString()}`;
+    logTo(GENERAL_TAB, `Health check ${d.label}: ${label}.`, d.state === "healthy" ? "success" : d.state === "warning" ? "warning" : "error");
+    for (const i of d.issues || []) logTo(GENERAL_TAB, `  ${i}`, "warning");
+  } catch (e) {
+    const msg = serverDown ? "Matrix Facility Manager isn't running." : `Health check failed: ${e.message || e}`;
+    el("hc-status").textContent = msg;
+    toast(msg, "error");
+    logTo(GENERAL_TAB, msg, "error");
+  } finally {
+    hcBusy = false;
+    btn.disabled = false;
+    btn.innerHTML = HC_RUN_HTML;
+  }
+}
+el("hc-run").addEventListener("click", runHealthCheck);
+el("hc-device-fields").addEventListener("keydown", (e) => { if (e.key === "Enter") runHealthCheck(); });
+function hcExportMarkdown() {
+  const r = hcResult;
+  if (!r) return;
+  const cell = (v) => String(v ?? "").replace(/\|/g, "\\|").replace(/\n/g, " ");
+  const [, label] = HC_STATE[r.state] || ["", r.state];
+  const out = [`# Device health report: ${r.label}`, "",
+    `- **Result:** ${label}`, `- **Address:** ${r.target.port ? `${r.target.host}:${r.target.port}` : r.target.host}`,
+    `- **Checked:** ${r.checked_at ? new Date(r.checked_at).toLocaleString() : "-"}${r.sudo ? " (elevated)" : " (not elevated)"}`,
+    `- **Generated by:** Matrix Facility Manager`, ""];
+  for (const n of r.notes || []) out.push(`> ${n}`, "");
+  if ((r.device || []).length) out.push("## Device", "", ...r.device.map((d) => `- **${d.label}:** ${d.value}`), "");
+  for (const s of r.scores ? [r.scores.disk, r.scores.memory].filter(Boolean) : []) {
+    out.push(`## ${s.title}: ${s.score}/100 (${s.grade})`, "");
+    if ((s.facts || []).length) out.push(s.facts.join(" \u00b7 "), "");
+    if ((s.stats || []).length) out.push(...s.stats.map((x) => `- **${x.label}:** ${x.value}${x.hint ? ` (${x.hint})` : ""}`), "");
+    out.push(...(s.reasons.length ? s.reasons.map((x) => `- ${x}`) : ["- No problems found."]));
+    if ((s.missing || []).length) out.push(`- Not checked: ${s.missing.join("; ")}`);
+    out.push("");
+  }
+  if ((r.glance || []).length) out.push("## At a glance", "", ...r.glance.map((g) => `- **${g.label}:** ${g.value}`), "");
+  const acts = hcActions(r);
+  if (acts.length) out.push("## What to do", "", ...acts.map((a, i) => `${i + 1}. **${a.text}** (because: ${a.because.join("; ")})`), "");
+  if ((r.issues || []).length) out.push("## Issues", "", ...r.issues.map((i) => `- ${i}`), "");
+  const secs = r.sections || [];
+  for (const s of [...secs.filter(hcIsHealth), "OTHER", ...secs.filter((x) => !hcIsHealth(x))]) {
+    if (s === "OTHER") { out.push("# Other details (software and system info, not part of the health result)", ""); continue; }
+    out.push(`## ${s.title}`, "", "| Check | Result | State | What to do |", "| --- | --- | --- | --- |");
+    for (const it of s.items) out.push(`| ${cell(it.label)} | ${cell(it.value)} | ${it.state === "info" ? "-" : (HC_ITEM[it.state] || ["", it.state])[1]} | ${cell(it.action || "")} |`);
+    const details = s.items.filter((it) => it.detail && it.state !== "ok" && it.state !== "info");
+    for (const it of details) out.push("", `**${it.label}**`, "", "```", it.detail, "```");
+    out.push("");
+  }
+  const d = new Date(), p = (n) => String(n).padStart(2, "0");
+  const ts = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  lsDownload(`health-${r.label.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "").toLowerCase()}-${ts}.md`, out.join("\n") + "\n", "text/markdown");
+}
+// A .json report from MatrixHealthCheck.ps1 (Windows devices) has the same format.
+el("hc-open").addEventListener("click", () => el("hc-file").click());
+el("hc-file").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  try {
+    const d = JSON.parse((await f.text()).replace(/^\uFEFF/, ""));
+    if (!d || !Array.isArray(d.sections) || !d.target) throw new Error("not a health check report");
+    hcResult = d;
+    hcRenderReport();
+    el("hc-updated").textContent = `opened ${f.name}`;
+    logTo(GENERAL_TAB, `Health check report opened: ${f.name} (${d.label}).`, "info");
+  } catch (err) {
+    toast(`Couldn't open ${f.name}: ${err.message || err}`, "error");
+  }
+});
 
 /* ---------- Site profiles ---------- */
 async function loadProfiles() {
@@ -2380,7 +2909,8 @@ function markSaved(id, saved, clear = false) {
   if (!input) return;
   if (input.dataset.ph === undefined) input.dataset.ph = input.placeholder || "";
   if (clear) input.value = "";
-  input.placeholder = saved ? "Saved - leave blank to use it" : input.dataset.ph;
+  input.placeholder = saved ? "\u2713 Saved - leave blank to use it" : input.dataset.ph || " ";
+  input.classList.toggle("has-saved", !!saved);
 }
 // A credential is available if it's typed in, or saved on this computer.
 const hasCred = (id, key) => !!(el(id).value || (state.setup && state.setup.saved && state.setup.saved[key]));
@@ -2442,14 +2972,41 @@ async function loadSetup(force = false) {
   state.setup = s;
   const fac = s.facility;
   el("facility-badge").textContent = fac ? `${fac.site_code} \u00b7 version ${fac.version}` : "not imported for this lab";
+  // Window / taskbar title: which lab this window is on.
+  document.title = c.site_name ? `Matrix Facility Manager - ${c.site_name}` : "Matrix Facility Manager";
+  renderNeedCreds();
   applyTeam(p.team);
   // First run on this computer: ask for the team, then (per site) the lab credentials.
   if (!p.team) el("team-modal").hidden = false;
   else maybeAskCreds();
 }
+// Passwords a lab can't do without: room SSH, the router (Network, Fiber
+// Test, Fix router config) and, when the facility config lists switches, the
+// switches (reached through the router). Setup Check flags the same ones.
+const labSwitchCount = (s) => (s.facility && s.facility.switch_count) || 0;
+function requiredCreds(s) {
+  return [
+    ["creds-ssh", "ssh_password", "SSH password"],
+    ["creds-router-pass", "router_admin_password", "Router SSH password"],
+    ...(labSwitchCount(s) ? [["creds-switch-pass", "switch_password", "Switch password"]] : []),
+  ];
+}
+const missingRequired = (s) => requiredCreds(s).filter(([, key]) => !s.saved[key]);
+function renderNeedCreds() {
+  const s = state.setup;
+  const need = missingRequired(s).filter(([, key]) => key !== "ssh_password").map(([, , label]) => label.replace(" SSH", "").toLowerCase());
+  const text = need.length
+    ? `No ${need.join(" or ")} saved for ${s.connection.site_name || "this lab"}, so this tab can't log in to the router and switches. ` +
+      "Enter them once - they're saved on this computer only."
+    : "";
+  document.querySelectorAll("[data-need-creds]").forEach((b) => {
+    b.hidden = !need.length;
+    b.querySelector("[data-need-creds-text]").textContent = text;
+  });
+}
 function maybeAskCreds() {
   const s = state.setup;
-  if (s && !s.saved.ssh_password && !credsSkipped.has(s.lab_env_path)) openCredsModal();
+  if (s && missingRequired(s).length && !credsSkipped.has(s.lab_env_path)) openCredsModal();
 }
 
 /* ---------- Team (QA vs Integration) + QA lock ---------- */
@@ -2465,6 +3022,8 @@ function applyTeam(team) {
   });
   // QA-only cards inside shared tabs (Actions > NMS Configuration).
   document.querySelectorAll("[data-qa-only]").forEach((c) => (c.hidden = !qa));
+  // The Network tab's QA forwards (SWU, API) follow the same rule server-side.
+  if (routerPorts && routerPorts.qa_port_forwards && routerPorts.qa_forwards_shown !== qa) loadRouterPorts();
   document.querySelectorAll("#team-selector .seg").forEach((b) => b.classList.toggle("active", b.dataset.team === (qa ? "qa" : team ? "integration" : "")));
   renderQaLock();
 }
@@ -2597,7 +3156,9 @@ const CREDS_FIELDS = {
   "creds-switch-pass": ["saved", "switch_password"],
   "creds-windows-pass": ["saved", "windows_password"],
 };
-function openCredsModal() {
+// section "router" scrolls to the Router & switches section (Setup Check /
+// Network / Fiber "Enter router & switch passwords" buttons).
+function openCredsModal(section = "") {
   const s = state.setup;
   if (!s) return;
   el("creds-site").textContent = s.connection.site_name || "this lab";
@@ -2615,14 +3176,22 @@ function openCredsModal() {
       field.classList.remove("replacing");
     }
   }
+  const required = requiredCreds(s);
+  document.querySelectorAll("#creds-modal .field").forEach((f) => f.classList.remove("required", "missing"));
+  for (const [id] of required) el(id).closest(".field").classList.add("required");
   el("creds-path").textContent = `Lab passwords are saved to ${s.lab_env_path}`;
   el("creds-error").hidden = true;
   el("creds-modal").hidden = false;
-  el("creds-ssh").focus();
+  const missing = required.filter(([, key]) => !s.saved[key]).map(([id]) => id);
+  const first = section === "router" ? missing.find((id) => id !== "creds-ssh") || "creds-router-pass" : missing[0] || "creds-ssh";
+  if (section === "router") el("creds-router").scrollIntoView({ block: "start" });
+  el(first).focus();
 }
 // Eye button inside a password box: show / hide what's typed or saved.
 const EYE_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>';
 function credsRevealButton(input) {
+  // :placeholder-shown (hides the eye while the box is empty) needs a placeholder.
+  if (!input.placeholder) input.placeholder = " ";
   let wrap = input.parentElement;
   if (!wrap.classList.contains("pw-wrap")) {
     wrap = document.createElement("span");
@@ -2659,6 +3228,7 @@ el("creds-modal-skip").addEventListener("click", skipCredsModal);
 el("edit-creds").addEventListener("click", openCredsModal);
 el("creds-modal").addEventListener("keydown", (e) => { if (e.key === "Enter") el("creds-modal-save").click(); });
 el("creds-modal").addEventListener("input", (e) => {
+  e.target.closest(".field")?.classList.remove("missing");
   const field = e.target.closest(".field.secret");
   if (!field) return;
   field.classList.toggle("replacing", field.classList.contains("is-saved") && !!e.target.value);
@@ -2673,6 +3243,15 @@ el("creds-modal-save").addEventListener("click", async () => {
   }
   const saved = Object.values(body).filter((v) => v !== null).length;
   el("creds-error").hidden = true;
+  const missing = requiredCreds(s).filter(([id, key]) => !el(id).value.trim() && !s.saved[key]);
+  if (missing.length) {
+    for (const [id] of missing) el(id).closest(".field").classList.add("missing");
+    el("creds-error").textContent = `Required for this lab: ${missing.map(([, , label]) => label).join(", ")}. ` +
+      "Don't have them yet? Click Skip for now - the Network and Fiber Test tabs won't work until they're saved.";
+    el("creds-error").hidden = false;
+    el(missing[0][0]).focus();
+    return;
+  }
   const done = setBusy(el("creds-modal-save"), "Saving\u2026");
   try {
     const res = await fetch("/api/setup/save", {
@@ -2763,17 +3342,23 @@ el("folders-save").addEventListener("click", async () => {
 const PF_FIX_LABEL = {
   creds: "Enter passwords",
   "creds-shared": "Enter my Artifactory/Jenkins details",
+  "creds-router": "Enter router & switch passwords",
   folders: "Set my folders",
+  network: "Check again",
 };
 let preflightLogged = false;
 function runPreflightFix(action) {
   if (action === "folders") {
     openSettingsTab();
-    el("folders-card").scrollIntoView({ behavior: "smooth", block: "start" });
+    scrollWorkTo(el("folders-card"));
     el("fold-swu-download-dir").focus();
     return;
   }
-  openCredsModal();
+  if (action === "network") {
+    loadPreflight();
+    return;
+  }
+  openCredsModal(action === "creds-router" ? "router" : "");
   if (action === "creds-shared") {
     el("creds-shared").open = true;
     el("creds-art-email").focus();
@@ -2949,6 +3534,7 @@ function connectToJob(jobId, tabId) {
         el("swu-file").value = data.path;
         logTo(tabId, `SWU path set to ${data.path}`, "info");
         break;
+      case "router_changes": loadRouterChanges(); checkLiveRouter({ quiet: true }); break;
       case "all_done":
         logTo(tabId, "Job finished.", "info");
         if (tab) tab.finished = true;
@@ -3094,7 +3680,7 @@ const WEBAPP_MODES = {
     hint: "Runs git pull + npm install + npm run build in both repos and checks their versions match. Nothing is deployed; no rooms needed.",
   },
 };
-let webappMode = "deploy";
+let webappMode = "build-deploy";
 function setWebappMode(mode) {
   webappMode = mode;
   const m = WEBAPP_MODES[mode];
@@ -3106,7 +3692,7 @@ function setWebappMode(mode) {
   el("webapp-go-label").textContent = m.go;
 }
 document.querySelectorAll("#webapp-mode .seg").forEach((b) => b.addEventListener("click", () => setWebappMode(b.dataset.mode)));
-setWebappMode("deploy");
+setWebappMode("build-deploy");
 el("start-webapp-deploy").addEventListener("click", () => {
   const doBuild = webappMode !== "deploy";
   const buildOnly = webappMode === "build";
@@ -3664,12 +4250,19 @@ const ID_TOOLTIPS = {
   "ls-check-all": "Check every room in this site: services, encoders/decoders/displays seen by NMS, and the NMS license. Read-only.",
   "ls-check-selected": "Same check, only for the rooms ticked in the sidebar.",
   "router-ports-refresh": "Reload the port plan and generated commands for the active site's router.",
-  "router-live-check": "Log in to the router (read-only) and compare its real NAT rules with this plan. Uses the router login saved for this lab.",
+  "router-live-check": "Log in to the router (read-only) and compare its real NAT rules, groups, access rules, routes and hardening with this plan. Uses the router login saved for this lab.",
+  "rp-fix-copy": "Copy the commands that add the missing groups, access rules, NAT policy, routes and hardening lines, to paste into the router yourself. The app never applies these.",
   "facility-choose": "Pick a facility planner export (<SITE>-version<N>.zip) to add it as a lab, or update the lab it came from.",
   "router-ports-copy": "Copy the Cisco NAT block in the box (the rules you picked, plus any edits) to the clipboard.",
   "router-apply-nat": "SSH into the router, enter config mode, run the NAT lines in the box above, then write memory. Only static NAT lines are accepted. Only enabled after you tick the confirm box.",
   "nat-pick-missing": "Pick only the forwards the live router is missing (needs Check live router first).",
   "nat-reset": "Throw away your hand edits and go back to the commands for the rules you picked.",
+  "nat-undo-load": "Put the commands that remove the rules this app added (and re-add any it removed) into the box, so the router goes back to how it was. Review, then Apply to Router.",
+  "nat-undo-forget": "Clear the record of what this app changed on the router. The router itself isn't touched.",
+  "hc-run": "Log in to the device (read-only), check its disks, memory, temperatures, network and update readiness, and show what to do about anything wrong.",
+  "hc-download": "Save the Windows check script (MatrixHealthCheck.ps1) to this computer so you can copy it to the device.",
+  "hc-copy-cmd": "Copy the command that runs the script, to paste into the BeyondTrust Shell (or PowerShell on the device).",
+  "hc-open": "Show a .json report that MatrixHealthCheck.ps1 saved on a Windows device. Then use Save as PDF to keep it as a PDF.",
   "select-all": "Select every room.",
   "select-none": "Deselect every room.",
   "theme-toggle": "Switch between dark and light theme.",

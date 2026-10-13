@@ -28,19 +28,27 @@ from typing import Dict, List, Optional, Tuple
 _WS_URL_RE = re.compile(rb"ws://(?:127\.0\.0\.1|localhost):\d+")
 
 
-def _recv_all(sock) -> bytes:
-    """Read from ``sock`` (socket or SSH channel) until EOF (upstream sends
-    Connection: close)."""
-    chunks = []
-    while True:
+def _recv_response(sock) -> bytes:
+    """Read one HTTP response from ``sock`` (socket or SSH channel): the
+    headers, then ``Content-Length`` bytes of body (until EOF if there is no
+    length). Newer Chromium keeps the connection open despite our
+    ``Connection: close``, so waiting for EOF alone would hang every request."""
+    buf = b""
+    want = None
+    while want is None or len(buf) < want:
         try:
             b = sock.recv(65536)
         except OSError:
             break
         if not b:
             break
-        chunks.append(b)
-    return b"".join(chunks)
+        buf += b
+        if want is None and b"\r\n\r\n" in buf:
+            head, _ = buf.split(b"\r\n\r\n", 1)
+            m = re.search(rb"(?im)^content-length:\s*(\d+)\s*$", head)
+            if m:
+                want = len(head) + 4 + int(m.group(1))
+    return buf
 
 
 class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
@@ -148,7 +156,7 @@ def make_devtools_proxy(transport, chain_port: int) -> Tuple[http.server.HTTPSer
             req.append("Connection: close")
             try:
                 up.sendall(("\r\n".join(req) + "\r\n\r\n").encode("latin1") + body)
-                resp = _recv_all(up)
+                resp = _recv_response(up)
             finally:
                 up.close()
 
@@ -264,7 +272,9 @@ def cdp_call(targets: list, method: str, params: Optional[dict] = None, timeout:
     url = page["webSocketDebuggerUrl"]
     if not url.startswith("ws://127.0.0.1:"):
         raise RuntimeError("Unexpected DevTools debugger URL.")
-    with ws_connect(url, open_timeout=timeout, max_size=None) as ws:
+    # Short close_timeout: Chromium doesn't drop the connection after the
+    # close handshake, and the default 10 s wait made every call that slow.
+    with ws_connect(url, open_timeout=timeout, close_timeout=1, max_size=None) as ws:
         ws.send(json.dumps({"id": 1, "method": method, "params": params or {}}))
         while True:
             msg = json.loads(ws.recv(timeout=timeout))

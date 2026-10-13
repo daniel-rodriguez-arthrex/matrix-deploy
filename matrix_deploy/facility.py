@@ -25,6 +25,8 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import router_policy
+
 MAX_ZIP_BYTES = 50 * 1024 * 1024
 # Uncompressed, across all entries: a small zip can't expand to gigabytes.
 MAX_UNPACKED_BYTES = 200 * 1024 * 1024
@@ -138,6 +140,8 @@ def parse_router_config(text: str) -> Dict[str, Any]:
         "wan_ip": wan["ip"] if wan else None,
         "inside_interfaces": [{"name": i["name"], "ip": i["ip"]} for i in interfaces if i["nat"] == "inside"],
         "nat": nat,
+        # Groups, access rules, NAT policy, routes, hardening (no secrets).
+        "policy": router_policy.parse(text),
     }
 
 
@@ -301,4 +305,9 @@ def diff_summary(old_fac: Optional[Dict[str, Any]], old_rooms: List[Dict[str, An
         nat = lambda f: sorted((r["inside_ip"], r["inside_port"], r["outside_port"]) for r in f.get("router", {}).get("nat", []))
         if nat(old_fac) != nat(new_fac):
             changes.append("Router NAT rules in the planner changed")
+        policy = lambda f: {k: v for k, v in (f.get("router", {}).get("policy") or {}).items() if k != "interfaces"}
+        if old_fac.get("router", {}).get("policy") and policy(old_fac) != policy(new_fac):
+            changes.append("Router groups, access rules, routes or hardening in the planner changed")
+        elif not old_fac.get("router", {}).get("policy"):
+            changes.append("Adds the planner's router groups, access rules and routes (compared on the Network tab)")
     return changes

@@ -5,6 +5,10 @@
 <script src="/static/theme.js"></script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Matrix Facility Manager</title>
+<link rel="icon" type="image/x-icon" sizes="16x16 20x20 24x24 32x32 40x40 48x48 64x64 128x128 256x256" href="/static/app-icon.ico?v=2" />
+<link rel="icon" type="image/png" sizes="32x32" href="/static/app-icon-32.png?v=2" />
+<link rel="icon" type="image/png" sizes="48x48" href="/static/app-icon-48.png?v=2" />
+<link rel="icon" type="image/png" sizes="256x256" href="/static/app-icon.png?v=2" />
 <link rel="stylesheet" href="/static/fonts/fonts.css" />
 <link rel="stylesheet" href="/static/style.css" />
 </head>
@@ -66,6 +70,7 @@
         <button class="tab active" data-tab="lab-status">Facility</button>
         <button class="tab" data-tab="router-ports">Network</button>
         <button class="tab" data-tab="fiber">Fiber Test</button>
+        <button class="tab" data-tab="health">Health Check</button>
         <button class="tab" data-tab="logs">Logs</button>
         <button class="tab" data-tab="actions">Actions</button>
         <button class="tab" data-tab="tunnels" data-team="qa">Tunnels</button>
@@ -216,8 +221,8 @@
           <div class="panel-section">
             <div class="subgroup-label">Mode</div>
             <div class="segmented sm-seg" id="webapp-mode">
-              <button class="seg" data-mode="build-deploy">Build + deploy</button>
-              <button class="seg active" data-mode="deploy">Deploy existing build</button>
+              <button class="seg active" data-mode="build-deploy">Build + deploy</button>
+              <button class="seg" data-mode="deploy">Deploy existing build</button>
               <button class="seg" data-mode="build">Build only</button>
             </div>
             <p class="mode-hint" id="webapp-mode-hint"></p>
@@ -459,6 +464,10 @@
 
       <!-- NETWORK TAB (router port forwarding + switch layout) -->
       <section class="tab-panel" data-panel="router-ports">
+        <div class="setup-banner error" data-need-creds hidden>
+          <span class="setup-banner-text" data-need-creds-text></span>
+          <button class="primary sm" data-pf-fix="creds-router">Enter router &amp; switch passwords</button>
+        </div>
         <div class="card accent">
           <div class="card-head">
             <h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="14" width="20" height="7" rx="1"/><path d="M6 14v-3a6 6 0 0 1 12 0v3M6 18h.01M10 18h.01"/></svg> Router</h2>
@@ -491,6 +500,28 @@
           </div>
         </div>
 
+        <div class="card" id="rp-card">
+          <div class="card-head">
+            <h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg> Router groups, rules &amp; policies</h2>
+            <span class="badge subtle" id="rp-source"></span>
+          </div>
+          <p class="hint" id="rp-hint"></p>
+          <div class="panel-section">
+            <div class="switch-summary" id="rp-summary"></div>
+            <ul class="switch-issues" id="rp-issues" hidden></ul>
+            <div id="rp-body"></div>
+            <details class="net-other router-fold" id="rp-fix" hidden>
+              <summary class="subgroup-label">Commands to add what's missing <span class="badge subtle">copy only</span></summary>
+              <p class="hint">Paste these into the router yourself (SSH or console) after checking them. <b>Apply to Router</b> only sends static NAT forwards, so groups, access rules, routes and hardening are never changed by the app. New access rules go to the end of the list.</p>
+              <textarea id="rp-fix-script" class="code-editor compact" spellcheck="false" readonly></textarea>
+              <div class="action-grid" style="margin-top:8px;">
+                <button class="action" id="rp-fix-copy"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy commands</button>
+                <span class="config-status" id="rp-fix-status"></span>
+              </div>
+            </details>
+          </div>
+        </div>
+
         <div class="card">
           <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h.01M10 11h.01M14 11h.01M18 11h.01M6 14h12"/></svg> Switches</h2><span class="badge subtle" id="switches-badge"></span>
             <span class="net-head-actions">
@@ -509,8 +540,18 @@
         </div>
 
         <details class="card fold" id="router-fix">
-          <summary><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg> Fix router config</h2><span class="badge subtle">copy or apply the NAT commands</span></summary>
+          <summary><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m4 17 6-6-6-6M12 19h8"/></svg> Fix router config</h2><span class="badge subtle">copy or apply the NAT commands</span><span class="badge pf-warn" id="nat-undo-badge" hidden></span></summary>
           <p class="hint">Pick the forwards to add, then paste the Cisco block into the router yourself or let the app apply it over SSH (<code>configure terminal</code> &rarr; the lines &rarr; <code>end</code> / <code>write memory</code>). Lines that already exist are harmless. You can also edit the text; <b>Apply to Router</b> only accepts <code>ip nat inside source static &hellip;</code> lines (or <code>no ip nat &hellip;</code> to remove one).</p>
+          <div class="panel-section" id="nat-undo" hidden>
+            <div class="subgroup-head">
+              <span class="subgroup-label">Undo this app's changes <span class="badge subtle" id="nat-undo-count"></span></span>
+              <span class="nat-quick">
+                <button class="action" id="nat-undo-load">Load undo commands</button>
+                <button class="ghost sm" id="nat-undo-forget">Forget</button>
+              </span>
+            </div>
+            <p class="hint" id="nat-undo-hint"></p>
+          </div>
           <div class="panel-section">
             <div class="subgroup-head">
               <span class="subgroup-label">1. Rules to add <span class="badge subtle" id="nat-count"></span></span>
@@ -557,6 +598,10 @@
 
       <!-- FIBER TEST TAB (SFP light levels + port error counters, read-only) -->
       <section class="tab-panel" data-panel="fiber">
+        <div class="setup-banner error" data-need-creds hidden>
+          <span class="setup-banner-text" data-need-creds-text></span>
+          <button class="primary sm" data-pf-fix="creds-router">Enter router &amp; switch passwords</button>
+        </div>
         <div class="card accent">
           <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg> Fiber Test</h2><span class="badge subtle" id="fiber-updated">not tested yet</span></div>
           <p class="hint">Checks both ends of every fiber link: the light each switch SFP and each encoder/decoder SFP receives and sends, the loss in each direction, SFP health, and the error counters on both ends. Test again after cleaning or replugging a fiber to see the light change and whether errors are still going up. Read-only - nothing on the switches or rooms is changed and the counters aren't cleared. Uses the router and switch passwords saved for the lab, and the SSH and sudo passwords from the sidebar for each room's NMS.</p>
@@ -593,6 +638,66 @@
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- HEALTH CHECK TAB (one device's hardware health, read-only) -->
+      <section class="tab-panel" data-panel="health">
+        <div class="card accent">
+          <div class="card-head"><h2><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg> Device Health Check</h2><span class="badge subtle" id="hc-updated">not checked yet</span></div>
+          <p class="hint">Finds the hardware problems behind failed updates, network drops and corrupt downloads, and tells you what to do about them. Nothing on the device is changed.</p>
+          <div class="panel-section">
+            <div class="hc-step">1. What are you checking?</div>
+            <div class="hc-choices" id="hc-mode">
+              <button class="hc-choice" data-mode="room"><strong>A room in this lab</strong><span>Pick it from a list. Uses the lab's saved login.</span></button>
+              <button class="hc-choice" data-mode="device"><strong>A Linux device</strong><span>Any device you can reach by IP address. You type its login.</span></button>
+              <button class="hc-choice" data-mode="windows"><strong>A Windows device</strong><span>For example over BeyondTrust. You run a small script on it.</span></button>
+            </div>
+          </div>
+          <div class="panel-section" id="hc-room-fields" hidden>
+            <div class="hc-step">2. Pick the room</div>
+            <div class="tunnel-target">
+              <label class="field"><span>Room</span><select id="hc-room"></select></label>
+            </div>
+            <div class="hc-creds" id="hc-room-creds"></div>
+          </div>
+          <div class="panel-section" id="hc-device-fields" hidden>
+            <div class="hc-step">2. Enter the device's address and login</div>
+            <div class="field-row">
+              <label class="field grow"><span>IP address</span><input type="text" id="hc-host" autocomplete="off" spellcheck="false" placeholder="e.g. 10.1.3.20" /></label>
+              <label class="field"><span>Username</span><input type="text" id="hc-user" autocomplete="off" spellcheck="false" placeholder="e.g. arthrex" /></label>
+              <label class="field"><span>Password</span><input type="password" id="hc-pass" autocomplete="off" /></label>
+            </div>
+            <details class="hc-more">
+              <summary>More options (SSH port, separate sudo password)</summary>
+              <div class="field-row stack-gap">
+                <label class="field hc-port"><span>SSH port</span><input type="number" id="hc-port" min="1" max="65535" value="22" /></label>
+                <label class="field"><span>Sudo password</span><input type="password" id="hc-sudo" autocomplete="off" placeholder="blank = same as above" /></label>
+              </div>
+            </details>
+            <p class="hint hc-note">Used for this check only, never saved. A Matrix room behind a lab router is reached at the <b>router's</b> IP with SSH port <b>200 + room number</b> (OR 3 = 203) and the room login (user <code>arthrex</code>, not the router's <code>admin</code>). For rooms in a lab you've set up, <b>A room in this lab</b> does this for you.</p>
+          </div>
+          <div class="panel-section" id="hc-windows-fields" hidden>
+            <div class="hc-step">2. Follow these steps</div>
+            <ol class="hc-steps">
+              <li><span>Download the check script to this computer.</span>
+                <a class="action" id="hc-download" href="/api/tools/health-check.ps1" download="MatrixHealthCheck.ps1"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg> Download MatrixHealthCheck.ps1</a></li>
+              <li><span>In BeyondTrust, open <b>File Transfer</b> and upload it to the device's <code>C:\Users\Public\Documents</code> folder.</span></li>
+              <li><span>In BeyondTrust, open <b>Shell</b>, paste this command and press Enter:</span>
+                <div class="hc-cmd"><code id="hc-cmd">powershell -NoProfile -ExecutionPolicy Bypass -File C:\Users\Public\Documents\MatrixHealthCheck.ps1</code>
+                  <button class="action" id="hc-copy-cmd"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg> Copy command</button></div></li>
+              <li><span>Wait about 30 seconds. The result and <b>what to do</b> are printed right there in the shell.</span></li>
+              <li><span>To keep a record: download the <code>.json</code> file it saved (same folder) with File Transfer, then open it here.</span>
+                <input type="file" id="hc-file" accept=".json,application/json" hidden />
+                <button class="action" id="hc-open"><svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg> Open report file</button></li>
+            </ol>
+            <p class="hint hc-note">Sitting at the device instead? Open PowerShell as Administrator, run the same command and add <code>-Open</code> to see the report in a browser.</p>
+          </div>
+          <div class="panel-section action-grid ls-actions" id="hc-run-row" hidden>
+            <button class="primary lg" id="hc-run"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg> 3. Run Health Check</button>
+            <span class="config-status" id="hc-status"></span>
+          </div>
+        </div>
+        <div id="hc-report"></div>
       </section>
 
       <!-- SETTINGS TAB -->
@@ -798,14 +903,20 @@
           <label class="field"><span>Jenkins token</span><input type="password" id="creds-jenkins-token" autocomplete="off" /></label>
         </div>
       </details>
-      <details class="creds-section" id="creds-router">
-        <summary class="creds-section-head"><span class="subgroup-label">Router, switches &amp; Windows</span><span class="badge subtle">optional &middot; this lab</span></summary>
-        <p class="hint creds-note">Filled in by a facility config import. Used by the Network tab and Apply to Router.</p>
+      <section class="creds-section" id="creds-router">
+        <div class="creds-section-head"><span class="subgroup-label">Router &amp; switches</span><span class="badge subtle">required &middot; this lab</span></div>
+        <p class="hint creds-note">The Network tab, Fiber Test and Fix router config log in to the lab router (username <code>admin</code> unless yours differs) and reach every switch through it. These aren't in the facility planner zip - ask whoever set up the lab's router and switches.</p>
         <div class="creds-grid">
-          <label class="field"><span>Router SSH username</span><input type="text" id="creds-router-user" autocomplete="off" /></label>
-          <label class="field"><span>Router SSH password</span><input type="password" id="creds-router-pass" autocomplete="off" /></label>
+          <label class="field"><span>Router SSH username</span><input type="text" id="creds-router-user" autocomplete="off" placeholder="admin" /></label>
+          <label class="field required"><span>Router SSH password</span><input type="password" id="creds-router-pass" autocomplete="off" /></label>
+          <label class="field required" id="creds-switch-field"><span>Switch password</span><input type="password" id="creds-switch-pass" autocomplete="off" /></label>
           <label class="field"><span>Enable password</span><input type="password" id="creds-router-enable" autocomplete="off" /></label>
-          <label class="field"><span>Switch password</span><input type="password" id="creds-switch-pass" autocomplete="off" /></label>
+        </div>
+      </section>
+      <details class="creds-section" id="creds-other">
+        <summary class="creds-section-head"><span class="subgroup-label">Windows</span><span class="badge subtle">optional &middot; this lab</span></summary>
+        <p class="hint creds-note">Filled in by a facility config import.</p>
+        <div class="creds-grid">
           <label class="field"><span>Windows password</span><input type="password" id="creds-windows-pass" autocomplete="off" /></label>
         </div>
       </details>

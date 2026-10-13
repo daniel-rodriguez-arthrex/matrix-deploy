@@ -73,6 +73,7 @@ Write-Host "Building folder app..."
 # exe signed/allowlisted by IT instead.
 Invoke-Native "PyInstaller" { python -m PyInstaller --noconfirm --clean --console --name MatrixDeploy `
   --workpath "$work\build" --specpath "$work" --distpath "$stage" `
+  --icon "$PSScriptRoot\matrix_deploy\web\static\app-icon.ico" `
   --add-data "$PSScriptRoot\matrix_deploy\web\static;matrix_deploy\web\static" `
   --add-data "$PSScriptRoot\matrix_deploy\golden_files;matrix_deploy\golden_files" `
   --hidden-import "cryptography.hazmat.bindings._rust" `
@@ -116,6 +117,11 @@ foreach ($p in $profiles) {
 }
 Copy-Item "config\deploy_config.example.json" $cfgOut
 Copy-Item ".env.example" (Join-Path $distDir ".env.example")
+# Windows device health check: copied on its own to field devices (never the
+# rest of this folder - it holds lab passwords).
+$toolsOut = Join-Path $distDir "tools"
+New-Item -ItemType Directory -Force $toolsOut | Out-Null
+Copy-Item "tools\health-check\MatrixHealthCheck.ps1" $toolsOut
 
 @"
 MATRIX FACILITY MANAGER - QUICK START

@@ -125,8 +125,8 @@ class ConnectionConfig:
     nms_username: str = "admin"
     nms_graphql_path: str = "/api/graphql"
     router_wan_interface: str = "GigabitEthernet0/0/0"
-    # QA labs also forward SSH/SWU/NMS per room (200+n, 300+n, 11000+n) for
-    # testing. A real facility only gets the planner's API forward (10000+n).
+    # Every lab needs SSH (200+n) and NMS (11000+n) forwarded for this app;
+    # QA labs also forward SWU (300+n) and API (10000+n).
     qa_port_forwards: bool = True
 
 
@@ -291,6 +291,16 @@ class AppConfig:
 
     def room(self, number: int) -> Optional[Room]:
         return self._rooms_by_number.get(number)
+
+    @classmethod
+    def standalone(cls) -> "AppConfig":
+        """No site profile at all: no rooms or router, so only the Health
+        Check's device mode (address + login typed in) works."""
+        return cls(
+            connection=ConnectionConfig(router_ip="", ssh_username=""),
+            artifactory=ArtifactoryConfig(url="", repo="", build_path=""),
+            site_name="No facility (device checks only)",
+        )
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "AppConfig":

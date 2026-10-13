@@ -16,14 +16,17 @@ window.FAQ_SECTIONS = [
           "<li>Double-click <code>MatrixDeploy.exe</code>. A small console window opens (just leave it or minimize it) and Matrix Facility Manager " +
           "opens in its own window. Closing the Matrix Facility Manager window quits the app, and the console closes by itself. " +
           "If a job is still running, it finishes first.</li>" +
+          "<li>On the taskbar the app is the <b>green icon with white stacked layers</b> (not the Chrome/Edge icon), and its window title " +
+          "shows the active lab, e.g. <i>Matrix Facility Manager - ACT QA LAB1</i>.</li>" +
           "<li>Go to <b>Settings &rarr; Setup Check</b>. Fix anything red with the button next to it. Amber items only affect optional features.</li>" +
           "</ul>",
       },
       {
         q: "What does the Setup Check look at?",
         a: "Whether the app folder is writable, the bundled app files are present, a site profile loads (and has no example values left), " +
-          "the lab SSH/sudo passwords are saved, your Artifactory and Jenkins credentials are set (optional), git/npm exist if you set " +
-          "build-from-source repos (optional), and whether the lab router answers. A red banner appears at the top of every tab while " +
+          "the lab SSH/sudo passwords are saved, the lab's <b>router and switch passwords</b> are saved (required), your Artifactory and " +
+          "Jenkins credentials are set (optional), git/npm exist if you set build-from-source repos (optional), and whether the lab router " +
+          "is on the network (required: every room, NMS and switch is reached through it). A red banner appears at the top of every tab while " +
           "something blocking is wrong. Click <b>Re-run check</b> after fixing things. If the app can't start at all, its console window explains why " +
           "and stays open until you press Enter.",
       },
@@ -52,11 +55,15 @@ window.FAQ_SECTIONS = [
           "(<code>&lt;SITE&gt;-version&lt;N&gt;.zip</code>). A preview shows the site, version, router, rooms, switches and which passwords it " +
           "contains. Each site becomes its <b>own lab</b> in the <b>Site</b> list (<code>config\\&lt;site&gt;.json</code> + <code>&lt;site&gt;.env</code>). " +
           "Importing a newer version of the same site updates that lab and lists what changed. If another lab already uses the same router you " +
-          "can update that one instead. Untick <b>QA test forwards</b> for a real facility whose router only has the planner's forwards." +
+          "can update that one instead. Tick <b>QA lab</b> only if the router also has the QA-only forwards (SWU 300+n, API 10000+n); SSH 200+n and NMS 11000+n are always planned." +
           "<ul>" +
           "<li>Passwords (Windows, NMS, Extron, site API key) go to the lab's <code>.env</code> on this computer only and never ship in the app zip. " +
           "The planner's Windows password also becomes the lab's SSH/sudo password unless one is already saved.</li>" +
-          "<li>The router and switch passwords aren't in the export. Add them once under <b>Edit saved credentials &rarr; Router, switches &amp; Windows</b>.</li>" +
+          "<li>The router and switch passwords aren't in the export, and they're <b>required</b>. Right after the import the app asks for them " +
+          "(<b>Router &amp; switches</b> section). Skipped it? Click <b>Enter router &amp; switch passwords</b> on the red banner, in " +
+          "<b>Settings &rarr; Setup Check</b>, or on the Network / Fiber Test tab (same as <b>Settings &rarr; Edit saved credentials</b>).</li>" +
+          "<li>The lab router has to be on the network (you on the Arthrex network/VPN, router powered and cabled). " +
+          "<b>Setup Check &rarr; Lab router</b> tells you if it isn't.</li>" +
           "<li>The uploaded zip (incl. the NMS CA key) isn't kept.</li>" +
           "</ul>",
       },
@@ -120,10 +127,16 @@ window.FAQ_SECTIONS = [
           "<li><b>Displays</b>: decoder outputs with a screen plugged in. Open <b>Devices</b> on a card to see each device's model, ID, firmware, " +
           "and which sources and displays are connected to it.</li>" +
           "<li>Whether the room's <b>NMS license</b> is active. Hover the license badge to see each licensed feature.</li>" +
-          "<li><b>Temperatures and fans</b>: each encoder and decoder's CPU/FPGA temperature and fan speed (RPM and fan duty %) are in the " +
-          "<b>Temp / Fans</b> column under <b>Devices</b>. A device with a problem keeps its <b>online</b> state and gets a " +
-          "<b>needs attention</b> badge (hover it for the reason), and the flagged reading turns red. The <b>Hottest</b> badge on the card shows the room's highest reading and turns red " +
-          "when NMS raises a hardware alert (e.g. <i>CPU temp too high</i>, <i>Fan speed too low</i>). Hover it for details.</li>" +
+          "<li><b>Temperatures, fans and fiber light</b>: each encoder and decoder's CPU/FPGA temperature, fan speed (RPM and % of the expected speed) " +
+          "and weakest SFP Rx/Tx power are in the <b>Temp / Fans / Fiber</b> column under <b>Devices</b>, graded against Barco's limits for MNA devices:" +
+          "<ul>" +
+          "<li><b>Rx/Tx power</b>: 0 to &minus;3.99 dBm ok, &minus;4 to &minus;6.99 dBm warning, &minus;7 dBm or lower critical (below &minus;26 dBm = no light, an unused port).</li>" +
+          "<li><b>Fan speed</b>: expected RPM is the fan PWM &times; 100. Below 75% of that is a warning, below 65% critical.</li>" +
+          "<li><b>CPU/FPGA temperature</b>: MNA-240 warning above 75&deg;C, critical above 85&deg;C; MNA-4x0 warning above 90&deg;C, critical above 95&deg;C.</li>" +
+          "</ul>" +
+          "A warning reading turns amber and a critical one red (hover it for the limit). The device keeps its <b>online</b> state and gets a " +
+          "<b>needs attention</b> or <b>critical</b> badge (hover it for the reasons). The <b>Hottest</b> badge on the card shows the room's highest temperature and turns " +
+          "amber/red when any device is past a limit. Other NMS hardware alerts count as warnings.</li>" +
           "</ul>" +
           "<b>Check All Rooms</b> checks every room in the site. <b>Check Selected Rooms</b> checks only the rooms ticked in the sidebar. " +
           "Every room is also checked automatically when the app opens or you switch site, as long as the SSH password is filled in. The checks are read-only and nothing on the rooms changes. A summary also goes to the <b>General</b> console tab.",
@@ -145,10 +158,12 @@ window.FAQ_SECTIONS = [
           "one row per device. Both use the last check, and also appear under <b>Logs &rarr; Downloads</b> for this session.",
       },
       {
-        q: "What makes a room Healthy, Needs attention, Error or Unreachable?",
+        q: "What makes a room Healthy, Needs attention, Critical, Error or Unreachable?",
         a: "<ul>" +
-          "<li><b>Healthy</b>: both services are active, NMS answered, every device is online, licensed, needs no firmware upgrade and has no NMS hardware alerts (temperature, fan), and the NMS license is active.</li>" +
+          "<li><b>Healthy</b>: both services are active, NMS answered, every device is online, licensed, needs no firmware upgrade and is within Barco's limits " +
+          "(temperature, fan speed, SFP Rx/Tx power) with no other NMS hardware alerts, and the NMS license is active.</li>" +
           "<li><b>Needs attention</b>: SSH works but something on that list doesn't. The card lists each problem.</li>" +
+          "<li><b>Critical</b>: at least one device is past one of Barco's critical limits (critical lines are red on the card).</li>" +
           "<li><b>Error</b>: SSH connected but the checks couldn't run.</li>" +
           "<li><b>Unreachable</b>: the room's SSH port (200 + room number on the router) didn't answer or the SSH password was rejected.</li>" +
           "</ul>",
@@ -169,14 +184,27 @@ window.FAQ_SECTIONS = [
         q: "What does the Network tab show?",
         a: "<ul>" +
           "<li><b>Router</b>: how each room is reached from outside, through a port on the site router (outside port = base + room number). " +
-          "One row per service, one square per room: <b>API / Cert</b> (10000+n) is the facility forward every site gets; <b>SSH</b> (200+n), " +
-          "<b>SWU</b> (300+n) and <b>NMS</b> (11000+n) are the extra QA test access. Hover a square to see exactly where it goes. " +
+          "One row per service, one square per room. <b>SSH</b> (200+n) and <b>NMS</b> (11000+n) are the <b>facility</b> forwards this " +
+          "tool needs in every lab (room SSH, Facility check, Fiber Test). <b>SWU</b> (300+n) and <b>API / Cert</b> (10000+n) are " +
+          "<b>QA only</b> and only show for labs imported with the QA checkbox ticked (the room's <b>App</b> button needs the API forward, " +
+          "so it's hidden without it). " +
+          "Hover a square to see exactly where it goes. " +
           "<b>All forwards</b> (folded) has the same plan as a table.</li>" +
           "<li><b>Check live router</b> logs in to the router (read-only, it never enters config mode) and colours each square " +
           "<b>green</b> (forwarded), <b>red</b> (missing) or <b>amber</b> (the port is used by something else). The line above says how many " +
           "forwards are OK, and every problem is spelled out with what it breaks (e.g. <i>OR 4 SSH: port 204 isn't forwarded - this app can't SSH in</i>) " +
           "or where the port goes instead. Every other forward on the router is listed under <b>Other ports in use</b>, labelled with what " +
           "it points at (room DevTools, Extron, switch SSH...). It runs automatically the first time you open the tab when a router password is saved for the lab.</li>" +
+          "<li><b>Router groups, rules &amp; policies</b>: everything else a Matrix router normally gets, in plain English. " +
+          "<b>What the rooms can reach outside</b>: the NAT policy (<code>ip nat inside source list NMS-NAT-OUT ... overload</code>) and the " +
+          "access rules it uses, grouped like the planner (Bomgar, Datadog, External Apps); traffic that isn't allowed there doesn't leave the lab. " +
+          "<b>Address groups</b>: the host lists those rules use (Datadog proxies, external apps). <b>Routes</b>: the default route and each room " +
+          "subnet's main and backup path through the switch uplinks. <b>Interfaces</b>: the customer network port (NAT outside) and the switch uplink VLANs (NAT inside). " +
+          "<b>Hardening</b>: CDP and the web admin page off, SSH v2 only, password encryption and so on. " +
+          "The plan is the router config from the lab's facility planner export; labs imported before this was kept are compared with the standard " +
+          "Matrix template until you import the zip again. After <b>Check live router</b> each item is green (on the router), red (missing), " +
+          "blue (on the router but not in the plan, usually fine) or amber (to review: hardening lines some IOS versions don't list when they're the default). " +
+          "<b>Commands to add what's missing</b> is copy-only: paste it into the router yourself. <b>Apply to Router</b> never changes these.</li>" +
           "<li><b>Switches</b>: each switch's ports coloured by room VLAN, uplink and backbone, like the facility planner, plus each VLAN's tag, " +
           "gateway IP and port range. This needs the lab's facility config (Settings &rarr; Facility config).</li>" +
           "<li><b>Check switches</b> logs in to every switch (read-only, through the router's switch SSH forwards) and shows which ports " +
@@ -185,7 +213,7 @@ window.FAQ_SECTIONS = [
           "the device on it and which other port the same device uses), or open <b>Devices</b> for the full list. " +
           "Switch to <b>By room</b> to see every room's PC, Extron, encoders and decoders in one table. " +
           "It runs right after the router check when you open the tab, and takes a few seconds. Needs the lab's switch password " +
-          "(<b>Edit saved credentials &rarr; Router, switches &amp; Windows</b>).</li>" +
+          "(<b>Edit saved credentials &rarr; Router &amp; switches</b>).</li>" +
           "<li><b>Device names</b>: room PCs (.12), secondary PCs (.13), Extrons and the router come from the lab profile. Encoders and decoders " +
           "come from each room's Barco NMS: the name you gave the encoder's source or the decoder's display (e.g. <i>OR1 Display 1 - mna-240</i>), " +
           "with model and serial next to it, or just <i>Decoder MNA240</i> if nothing is named. Run the <b>Facility</b> check first; the list " +
@@ -200,7 +228,9 @@ window.FAQ_SECTIONS = [
           "with only one cable linked; an encoder/decoder running below 10G; a device whose IP doesn't belong to the room of the port it's " +
           "plugged into; something plugged into an unassigned port; and a router uplink or switch backbone port with no link.</li>" +
           "<li><b>Fix router config</b> (folded away): the Cisco <code>ip nat inside source static</code> commands for the forwards you pick. " +
-          "Click <b>Copy NAT Commands</b> to paste them yourself, or use <b>Apply to Router</b>.</li>" +
+          "Click <b>Copy NAT Commands</b> to paste them yourself, or use <b>Apply to Router</b>: it saves with <code>write memory</code>, " +
+          "then reads the router again and recolours the squares. If the router refuses a line, the console says which one and why (the others are still applied and saved). " +
+          "<b>Undo this app's changes</b> removes the rules the app added.</li>" +
           "</ul>",
       },
       {
@@ -226,8 +256,23 @@ window.FAQ_SECTIONS = [
           "NAT line in the box, <code>end</code> and <code>write memory</code> - the same steps you'd type by hand. Enter the router " +
           "SSH username/password (and enable password if needed) under <b>Network &rarr; Fix router config</b>, pick the rules (or edit the commands), " +
           "tick the confirm box after reviewing them, then click <b>Apply to Router</b>. The console tab shows the router's live output. Save these once under " +
-          "<b>Settings &rarr; Edit saved credentials &rarr; Router, switches &amp; Windows</b> and they'll prefill next time (per-lab, like the " +
+          "<b>Settings &rarr; Edit saved credentials &rarr; Router &amp; switches</b> and they'll prefill next time (per-lab, like the " +
           "SSH/sudo passwords). Because this writes live config to lab network infrastructure, double-check the commands first.",
+      },
+      {
+        q: "How do I put the router back the way it was after adding rules?",
+        a: "Every <b>Apply to Router</b> reads the router's NAT rules before and after the change and remembers (on this computer, per lab) which rules the app " +
+          "added or removed. When there are any, <b>Network &rarr; Fix router config</b> shows a <b>changes by this app</b> badge and an " +
+          "<b>Undo this app's changes</b> section listing them. <b>Load undo commands</b> puts the <code>no ip nat &hellip;</code> lines (and the re-add lines " +
+          "for rules the app removed) into the command box; review them, tick the confirm box and click <b>Apply to Router</b>. Once applied, the record is empty again. " +
+          "Rules that were already on the router before aren't touched. <b>Forget</b> only clears the record (e.g. you fixed the router by hand); it doesn't change the router. " +
+          "Changes made by pasting the commands yourself aren't recorded.",
+      },
+      {
+        q: "Why doesn't the Network tab show the SWU and API forwards?",
+        a: "SWU (300+n) and API (10000+n) are QA-only forwards. On the Integration team (or while the QA features are locked) they aren't checked against the live router, " +
+          "aren't listed under \"not part of this plan\", and can't be picked in <b>Fix router config</b>. SSH and NMS are always shown. Switch to QA under " +
+          "<b>Settings &rarr; Your team</b> to see them.",
       },
     ],
   },
@@ -268,9 +313,11 @@ window.FAQ_SECTIONS = [
       {
         q: "What do the Fiber Test problems and warnings mean?",
         a: "<ul>" +
-          "<li><b>Rx outside the lab's range</b> (&minus;5 to &minus;1.5 dBm, at the switch or the device): check the cabling. Usually a dirty or loose connector, " +
+          "<li><b>Switch Rx outside the lab's range</b> (&minus;5 to &minus;1.5 dBm): check the cabling. Usually a dirty or loose connector, " +
           "a tight bend or a damaged patch cable. Clean both ends, reseat, and test again. Below &minus;22 dBm there's no light at all (link down).</li>" +
-          "<li><b>Tx outside the lab's range</b> (&minus;4.5 to &minus;1.5 dBm): the SFP sending it is probably bad (in the switch or the device).</li>" +
+          "<li><b>Switch Tx outside the lab's range</b> (&minus;4.5 to &minus;1.5 dBm): the switch's SFP is probably bad.</li>" +
+          "<li><b>Device Rx/Tx Barco warning or critical</b> (the encoder/decoder end, Barco's limits: &minus;4 to &minus;6.99 dBm warning, " +
+          "&minus;7 dBm or lower critical): a weak Rx is usually the cabling (clean, reseat, test again); a weak Tx is the device's SFP.</li>" +
           "<li><b>High loss</b> (more than 3 dB in one direction): that strand of the fiber pair is dirty, bent or damaged. If only one direction is high, " +
           "clean or replace that strand; the other one is fine.</li>" +
           "<li><b>Weak light received</b> / alarm and warning wording: the SFP's own limits were crossed (shown in the port panel).</li>" +
@@ -289,6 +336,69 @@ window.FAQ_SECTIONS = [
           "(Remove Fingerprint only covers rooms).</li>" +
           "</ul>" +
           "The SFP alarm/warning wording uses each module's own limits; the lab ranges are the ones the team's fiber test script uses.",
+      },
+    ],
+  },
+  {
+    title: "Health Check",
+    items: [
+      {
+        q: "What does the Health Check tab do?",
+        a: "It checks one device's hardware for the usual causes of <b>failed software updates, random network drops and corrupt downloads</b>, " +
+          "and reports each item as OK, Warning or Problem. Read-only: nothing on the device is changed. It covers:" +
+          "<ul>" +
+          "<li><b>Storage:</b> SMART health, reallocated/pending sectors, NVMe wear and media errors, I/O and filesystem errors in the kernel log, " +
+          "read-only or nearly full filesystems, and free space in <code>/tmp</code> (where an update is unpacked).</li>" +
+          "<li><b>Memory and CPU:</b> free memory, out-of-memory kills, temperatures, machine-check and PCIe errors, load.</li>" +
+          "<li><b>Network:</b> every link's speed (anything under 1 Gb is flagged), errors, drops, link flapping, and whether the gateway answers.</li>" +
+          "<li><b>Update readiness:</b> failed services, Matrix API / Barco NMS, swupdate-client and the swupdate daemon.</li>" +
+          "</ul>" +
+          "Step 1 asks what you're checking: <b>A room in this lab</b> (uses the lab's saved or sidebar passwords, and says up front if they're missing), " +
+          "<b>A Linux device</b> (type its IP address, username and password; used for that one check, never saved) or <b>A Windows device</b> " +
+          "(step-by-step instructions for the script, see below). The result starts with a one-line verdict and a numbered <b>What to do</b> list, " +
+          "most important first, each with the checks that led to it; every check is listed below that. The result is about the device's " +
+          "<b>hardware health</b> only (drive, memory, CPU/temperature/power, network link). Software and system info (services, update tool, " +
+          "pending restart, Windows updates, OS details) is folded under <b>Other details</b> and doesn't change the result. <b>Save as PDF</b> opens the print dialog with just the report " +
+          "(white background, all details expanded): choose <b>Save as PDF</b> as the printer. <b>Save report for a ticket</b> downloads it as a " +
+          "Markdown file. With no lab configured, the app still starts and the room choice is greyed out.",
+      },
+      {
+        q: "How are the Drive health and Memory health scores worked out?",
+        a: "Each starts at 100 and loses points for signs that the hardware itself is failing. Free space doesn't count (that's shown separately " +
+          "under <b>At a glance</b>), because a full disk isn't a broken disk. Grades: <b>Good</b> 90-100, <b>Fair</b> 70-89, <b>Poor</b> 40-69, <b>Failing</b> under 40." +
+          "<ul>" +
+          "<li><b>Drive health</b> (the disk the device runs from; USB sticks and external drives don't count): the disk's own self-test (SMART) failing or " +
+          "predicting failure, unreadable or replaced sectors, read/write errors the disk couldn't fix, wear (life left), running hot, read/write errors " +
+          "and file system damage in the last 30 days, a drive locked read-only, and the disk stopping responding. One serious sign (self-test failed, " +
+          "unreadable sectors) caps the score at Failing/Poor on its own.</li>" +
+          "<li><b>Memory health</b>: memory errors counted by the hardware (ECC/EDAC on Linux, WHEA events on Windows), serious hardware errors, a failed " +
+          "Windows Memory Diagnostic, programs killed or slowed for lack of memory, and how much memory is free right now.</li>" +
+          "</ul>" +
+          "Each score lists the reasons it lost points, plus facts such as the disk model, <b>life left</b> and power-on hours, and installed memory. " +
+          "<b>Not checked</b> means something couldn't be read (e.g. not run as Administrator / no sudo password, or the hardware doesn't report memory " +
+          "errors), so the score may look better than the device really is. The memory score is based on error counters, not a full memory test: for that, " +
+          "run Windows Memory Diagnostic (<code>mdsched.exe</code>, restarts the device, 10-20 minutes); its last result is included in the next check.",
+      },
+      {
+        q: "Why does it say some checks were skipped (no sudo / not as Administrator)?",
+        a: "SMART data and the kernel error history need root. Without a working sudo password the check still runs as the normal account and says what it " +
+          "couldn't read. For Device by IP, a blank sudo password means the SSH password is tried for sudo.",
+      },
+      {
+        q: "How do I check a Windows device?",
+        a: "Choose <b>Health Check &rarr; A Windows device</b>: it walks you through it. Windows devices (e.g. Windows 10 IoT) run a small script, " +
+          "<code>MatrixHealthCheck.ps1</code> (also in the MatrixDeploy folder under <code>tools</code>). Copy only that file to the device, never the whole folder (it holds lab passwords)." +
+          "<ul>" +
+          "<li>Click <b>Download MatrixHealthCheck.ps1</b>.</li>" +
+          "<li><b>BeyondTrust:</b> upload it with <b>File Transfer</b> to <code>C:\\Users\\Public\\Documents</code>, then click <b>Copy command</b> and paste it into the " +
+          "<b>Shell</b> tab: <code>powershell -NoProfile -ExecutionPolicy Bypass -File C:\\Users\\Public\\Documents\\MatrixHealthCheck.ps1</code>.</li>" +
+          "<li>On the device's own screen: open PowerShell <b>as Administrator</b> and run the same command, adding <code>-Open</code> to show the report.</li>" +
+          "</ul>" +
+          "It prints the result and a numbered <b>WHAT TO DO</b> list first, then every check, and saves an <code>.html</code> report (open it in any browser) and a <code>.json</code> next to the script. Download them " +
+          "with File Transfer and attach them to the ticket, or view the <code>.json</code> in this app with <b>Health Check &rarr; Open report file</b>. It checks disk health and reliability counters, disk and NTFS errors, free space, dirty volumes, " +
+          "memory, hardware (WHEA) errors, unexpected shutdowns and blue screens, network adapters (speed, duplex, errors, link drops, gateway ping), pending " +
+          "reboots, Windows Update and service failures, and whether the Matrix app is running. Run it as Administrator for the full check. " +
+          "Exit code: 0 healthy, 1 warnings, 2 problems. If security software blocks the script, ask IT. Don't work around it.",
       },
     ],
   },
@@ -453,9 +563,11 @@ window.FAQ_SECTIONS = [
           "seconds, or you can use the new window that opens and close this one.",
       },
       {
-        q: "Setup Check says \"Lab network\" can't reach the router.",
-        a: "You're not on the lab network. Connect to the lab network or VPN, then click <b>Re-run check</b>. If only one room is unreachable, " +
-          "it may just be powered off.",
+        q: "Setup Check says the \"Lab router\" isn't answering.",
+        a: "Everything in this tool goes through the lab router, so nothing works until it answers. 1) Make sure you're on the Arthrex " +
+          "network or VPN. 2) Check the router is powered on and its WAN cable is plugged in. 3) Check the router IP under " +
+          "<b>Settings &rarr; Connection</b> is right. Then click <b>Check again</b>. If the router answers but one room doesn't " +
+          "(amber), that room may just be powered off.",
       },
       {
         q: "\"Its SSH host key changed\" / \"the NMS certificate changed\" / host key errors",

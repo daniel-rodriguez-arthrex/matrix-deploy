@@ -160,7 +160,9 @@ def main() -> None:
     try:
         config = AppConfig.load()
     except FileNotFoundError:
-        config_error = f"No site profile found in {config_dir()}."
+        # Still useful without a lab: Health Check > Device works on any address.
+        config = AppConfig.standalone()
+        print(f"No site profile in {config_dir()} - starting for device health checks only.")
     except (KeyError, TypeError, ValueError) as exc:
         config_error = f"Site profile is invalid ({exc.__class__.__name__}: {exc})."
 

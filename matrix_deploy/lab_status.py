@@ -10,6 +10,7 @@ matrix-lab VS Code extension uses. Nothing on the room is changed.
 from __future__ import annotations
 
 import concurrent.futures
+import re
 import shlex
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -56,9 +57,21 @@ query MatrixDeployLabDiagnostics {
       alerts { code category }
       fans { name speed pwm alerts { code category } }
     }
+    networkInterfaces { name rxPower txPower }
   }
 }
 """
+
+# Barco's limits for MNA devices (MTBF metrics): (warn, critical).
+# Temperatures (hottest of CPU/FPGA, °C) by model family: warn above, critical above.
+TEMP_LIMITS = {"2": (75, 85, "MNA-240"), "4": (90, 95, "MNA-4x0")}
+# Fan rpm against PWM x 100 (PWM is 0-100 %): warn below 75 %, critical below 65 %.
+FAN_LIMITS = (0.75, 0.65)
+# SFP Rx/Tx power (dBm): 0 to -3.99 ok, -4 to -6.99 warn, -7 or lower critical.
+# Below -26 dBm the port has no light at all (unused / unplugged), not a weak link.
+SFP_LIMITS = (-4.0, -7.0)
+SFP_DARK = -26.0
+_SEVERITY = {"ok": 0, "warn": 1, "bad": 2}
 
 # Fiber Test: the device end of every fiber link (each NMS device's SFP light
 # levels and receive errors per network port). Matched to switch ports by MAC.
@@ -200,21 +213,100 @@ def _alert_text(code: str) -> str:
     return text[:1].upper() + text[1:]
 
 
-def _diagnostics_summary(diag: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _grade_temp(model: str, t: Optional[float]) -> Optional[Dict[str, Any]]:
+    m = re.search(r"MNA-?(\d)", model or "", re.I)
+    limits = TEMP_LIMITS.get(m.group(1)) if m else None
+    if t is None or not limits:
+        return None
+    warn, crit, family = limits
+    state = "bad" if t > crit else "warn" if t > warn else "ok"
+    return {"state": state, "limit": f"{family}: warning above {warn}\u00b0C, critical above {crit}\u00b0C",
+            "rule": f"above {crit}\u00b0C" if state == "bad" else f"above {warn}\u00b0C"}
+
+
+def _grade_fan(rpm: Optional[float], pwm: Optional[float]) -> Optional[Dict[str, Any]]:
+    # PWM 0 = the fan isn't PWM-controlled (MNA-240 encoders report full speed at PWM 0).
+    if rpm is None or not pwm:
+        return None
+    expected = pwm * 100
+    ratio = rpm / expected
+    warn, crit = FAN_LIMITS
+    state = "bad" if ratio < crit else "warn" if ratio < warn else "ok"
+    return {"state": state, "expected": round(expected), "percent": round(ratio * 100),
+            "limit": f"PWM {pwm:g} % -> expected {expected:.0f} rpm; warning below {warn:.0%}, critical below {crit:.0%}",
+            "rule": f"below {crit:.0%} of PWM x 100" if state == "bad" else f"below {warn:.0%} of PWM x 100"}
+
+
+def _grade_sfp(v: Optional[float]) -> Optional[Dict[str, Any]]:
+    if v is None:
+        return None
+    if v < SFP_DARK:
+        return {"state": "dark"}
+    v = round(v, 2)
+    warn, crit = SFP_LIMITS
+    state = "bad" if v <= crit else "warn" if v <= warn else "ok"
+    return {"state": state, "rule": f"{crit:g} dBm or lower" if state == "bad" else f"{warn:g} to {crit + 0.01:g} dBm"}
+
+
+def _diagnostics_summary(diag: Optional[Dict[str, Any]], model: str = "") -> Optional[Dict[str, Any]]:
+    """Readings + NMS alerts, each graded against Barco's MNA limits.
+    ``findings`` are the warn/critical ones ({state, text}); ``state`` is the worst."""
     system = (diag or {}).get("system")
     if not system:
         return None
-    fans = [
-        {"name": f.get("name"), "rpm": f.get("speed"), "pwm": f.get("pwm"),
-         "alerts": [_alert_text(a.get("code")) for a in f.get("alerts") or []]}
-        for f in system.get("fans") or []
-    ]
+    findings: List[Dict[str, str]] = []
+
+    def find(state: str, text: str) -> None:
+        if state in ("warn", "bad"):
+            findings.append({"state": state, "text": f"{text} ({'critical' if state == 'bad' else 'warning'})"})
+
+    temps = {"cpu": _number(system.get("cpuTemperature")), "fpga": _number(system.get("fpgaTemperature"))}
+    grades = {k: _grade_temp(model, t) for k, t in temps.items()}
+    for k, g in grades.items():
+        if g:
+            find(g["state"], f"{k.upper()} temperature {g['rule']}")
+    fans = []
+    for f in system.get("fans") or []:
+        rpm, pwm = _number(f.get("speed")), _number(f.get("pwm"))
+        g = _grade_fan(rpm, pwm)
+        fan = {"name": f.get("name"), "rpm": f.get("speed"), "pwm": f.get("pwm"), "grade": g,
+               "alerts": [_alert_text(a.get("code")) for a in f.get("alerts") or []]}
+        fans.append(fan)
+        if g:
+            find(g["state"], f"{fan['name']} speed {g['rule']}")
+    sfp = []
+    for i in diag.get("networkInterfaces") or []:
+        rx, tx = _number(i.get("rxPower")), _number(i.get("txPower"))
+        if rx is None and tx is None:
+            continue
+        port = {"name": str(i.get("name") or ""), "rx": rx, "tx": tx, "rx_grade": _grade_sfp(rx), "tx_grade": _grade_sfp(tx)}
+        sfp.append(port)
+        for key in ("rx", "tx"):
+            g = port[f"{key}_grade"]
+            if g and g["state"] != "dark":
+                find(g["state"], f"{port['name']} {key.capitalize()} power {g['rule']}")
+    system_alerts = [_alert_text(a.get("code")) for a in system.get("alerts") or []]
+    alerts = system_alerts + [f"{f['name']}: {a}" for f in fans for a in f["alerts"]]
+    # NMS alerts on a reading Barco's limits already grade (temperature, fan
+    # speed) are covered by that grade; any other NMS alert is a warning.
+    graded_temp = {k.upper() for k, g in grades.items() if g}
+    for a in system_alerts:
+        if not any(a.startswith(f"{k} temp") for k in graded_temp):
+            find("warn", a)
+    for f in fans:
+        if not f["grade"]:
+            for a in f["alerts"]:
+                find("warn", f"{f['name']}: {a}")
+    state = max((x["state"] for x in findings), key=_SEVERITY.get, default="ok")
     return {
         "cpu_temp": system.get("cpuTemperature"),
         "fpga_temp": system.get("fpgaTemperature"),
+        "temp_grades": grades,
         "fans": fans,
-        "alerts": [_alert_text(a.get("code")) for a in system.get("alerts") or []]
-                  + [f"{f['name']}: {a}" for f in fans for a in f["alerts"]],
+        "sfp": sfp,
+        "alerts": alerts,
+        "findings": findings,
+        "state": state,
     }
 
 
@@ -243,7 +335,7 @@ def _device_summary(d: Dict[str, Any], diag: Optional[Dict[str, Any]] = None) ->
              "power": s.get("powerState"), "connected": bool(s.get("connected"))}
             for s in d.get("videoSinks") or []
         ],
-        "health": _diagnostics_summary(diag),
+        "health": _diagnostics_summary(diag, str(d.get("type") or "")),
     }
 
 
@@ -306,6 +398,9 @@ def _number(v: Any) -> Optional[float]:
         return None
 
 
+NMS_NOT_FORWARDED = "isn't forwarded through the router"
+
+
 def _nms_error(exc: Exception, base: str) -> str:
     """A readable NMS error. A changed certificate must stay visible as such
     (requests reports it as an SSLError, a kind of ConnectionError). A
@@ -319,7 +414,7 @@ def _nms_error(exc: Exception, base: str) -> str:
         host, _, port = base.split("//", 1)[-1].partition(":")
         reachable = port.isdigit() and port_is_open(host, int(port))
         return (f"NMS not answering at {base}" if reachable
-                else f"NMS port {port or 443} isn't reachable through the router (see Router Ports)")
+                else f"NMS port {port or 443} {NMS_NOT_FORWARDED}, so device details weren't read (see Network tab)")
     if isinstance(exc, requests.Timeout):
         return f"NMS timed out at {base}"
     return str(exc)
@@ -328,7 +423,8 @@ def _nms_error(exc: Exception, base: str) -> str:
 def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: Room) -> Dict[str, Any]:
     """Read-only health snapshot for one room. Never raises; problems are
     reported in ``issues`` and reflected in ``state``
-    (healthy / warning / error / unreachable)."""
+    (healthy / warning / critical (a device past Barco's critical limit) /
+    error / unreachable)."""
     conn = config.connection
     status: Dict[str, Any] = {
         "number": room.number,
@@ -337,6 +433,7 @@ def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: R
         "secondary": room.secondary,
         "state": "unreachable",
         "issues": [],
+        "notes": [],
         "checked_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "ssh": {"ok": False},
         "services": {},
@@ -421,7 +518,7 @@ def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: R
         except Exception as exc:  # noqa: BLE001
             msg = _nms_error(exc, base)
             status["nms"]["error"] = msg
-            issues.append(msg)
+            (status["notes"] if NMS_NOT_FORWARDED in msg else issues).append(msg)
 
     lic = status["license"]
     if lic:
@@ -431,6 +528,7 @@ def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: R
             issues.append("NMS license expired")
         elif lic["state"] == "grace":
             issues.append("NMS license is in its grace period")
+    critical = False
     for d in status["devices"]:
         label = f"{d['kind'].title()} {d['model'] or ''} ({d['id']})".replace("  ", " ")
         if d["state"] != "ONLINE":
@@ -439,11 +537,13 @@ def collect_room_status(config: AppConfig, creds: DeploymentCredentials, room: R
             issues.append(f"{label} is not licensed")
         if d["upgrade_required"]:
             issues.append(f"{label} needs a firmware upgrade")
-        for alert in (d["health"] or {}).get("alerts", []):
-            issues.append(f"{label}: {alert}")
+        # Text without live readings, so "Changed since" doesn't churn on every check.
+        for f in (d["health"] or {}).get("findings", []):
+            issues.append(f"{label}: {f['text']}")
+            critical = critical or f["state"] == "bad"
 
     if not status["ssh"]["ok"]:
         status["state"] = "error"
     else:
-        status["state"] = "warning" if issues else "healthy"
+        status["state"] = "critical" if critical else "warning" if issues else "healthy"
     return status

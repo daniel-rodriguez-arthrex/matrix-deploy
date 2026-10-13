@@ -25,13 +25,14 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
+import paramiko
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from ..artifactory import ArtifactoryClient, ArtifactoryCredentials, ArtifactoryError
-from ..config import AppConfig, Room, config_dir, list_profiles
+from ..config import AppConfig, Room, app_dir, config_dir, list_profiles
 from .. import facility as facility_mod
 from ..deployer import DeploymentCredentials, DeploymentRequest, Deployer
 from ..env_settings import (
@@ -43,9 +44,11 @@ from ..env_settings import (
     profile_env_path,
     protect_env_files,
     save_env_values,
+    switch_passwords_saved,
 )
+from ..health_check import collect_device_health
 from ..lab_status import collect_room_sfp, collect_room_status
-from .. import qa_lock, switch_status
+from .. import qa_lock, router_changes, router_policy, switch_status
 from ..preflight import run_preflight, summarize
 from ..jenkins import JENKINS_JOB, JenkinsClient, JenkinsCredentials, JenkinsError
 from ..ssh_client import KNOWN_HOSTS, SSHError, SSHTarget, connect, redact, run_cisco_config_commands, run_cisco_show, sudo_prefix
@@ -215,6 +218,8 @@ def _signed_in_page() -> str:
     by meta refresh, so signing in looks like the app is still starting."""
     html = (STATIC_DIR / "splash.html").read_text(encoding="utf-8")
     html = re.sub(r"(?s)<script>.*?</script>", "", html)
+    # Served at "/", so the splash's file-relative icon links need /static/.
+    html = html.replace('href="app-icon', 'href="/static/app-icon')
     return html.replace("<head>", "<head>\n<meta http-equiv=\"refresh\" content=\"0;url=/\" />", 1)
 
 
@@ -438,33 +443,61 @@ class JobManager:
         admin_password: str,
         enable_password: Optional[str],
         commands: List[str],
+        changes_key: Optional[str] = None,
     ) -> Job:
         job = self._register([])
+        show_nat = ["show running-config | include ip nat inside source static"]
 
-        def run() -> None:
-            job.emit({"type": "log", "message": f"Connecting to router {router_ip}:22 as {admin_username}...", "level": "info"})
+        def session(fn):
+            """One SSH connection per CLI session: Cisco IOS ends the whole
+            connection when a shell closes, so a second shell on the same
+            client fails (paramiko EOFError)."""
+            # Routers in other labs may run older Cisco IOS (SHA-1 only).
+            client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password), try_keys=False, sha1="fallback")
             try:
-                # Routers in other labs may run older Cisco IOS (SHA-1 only).
-                client = connect(SSHTarget(host=router_ip, port=22, username=admin_username, password=admin_password), try_keys=False, sha1="fallback")
-            except SSHError as exc:
-                job.emit({"type": "log", "message": f"SSH connection failed: {exc}", "level": "error"})
-                job.finish()
-                return
-            try:
-                run_cisco_config_commands(
-                    client,
-                    commands,
-                    enable_password=enable_password,
-                    log=lambda m, lvl: job.emit({"type": "log", "message": m, "level": lvl}),
-                )
-                job.emit({"type": "log", "message": "Router NAT config applied and saved (write memory).", "level": "success"})
-            except SSHError as exc:
-                job.emit({"type": "log", "message": f"Failed to apply router config: {exc}", "level": "error"})
-            except Exception as exc:  # noqa: BLE001
-                job.emit({"type": "log", "message": f"Unexpected error applying router config: {exc}", "level": "error"})
+                return fn(client)
+            except (EOFError, OSError, paramiko.SSHException) as exc:
+                raise SSHError(f"the router closed the SSH session ({type(exc).__name__}{f': {exc}' if str(exc) else ''})") from exc
             finally:
                 client.close()
-                job.finish()
+
+        def read_nat() -> str:
+            return session(lambda c: run_cisco_show(c, show_nat, enable_password=enable_password))
+
+        def run() -> None:
+            log = lambda m, lvl: job.emit({"type": "log", "message": m, "level": lvl})  # noqa: E731
+            before = None
+            try:
+                log(f"Connecting to router {router_ip}:22 as {admin_username}...", "info")
+                # The rules before/after are compared so the app knows which
+                # ones it added or removed (Fix router config > Undo).
+                if changes_key is not None:
+                    try:
+                        before = read_nat()
+                    except SSHError as exc:
+                        if "auth failed" in str(exc) or "No answer" in str(exc) or "Refused" in str(exc):
+                            raise
+                        log(f"Couldn't read the NAT rules first ({exc}); this change won't be undoable from the app.", "warning")
+                log(f"Applying {len(commands)} line(s) in config mode...", "info")
+                session(lambda c: run_cisco_config_commands(c, commands, enable_password=enable_password, log=log))
+                job.emit({"type": "log", "message": "Router NAT config applied and saved (write memory).", "level": "success"})
+            except SSHError as exc:
+                log(f"Failed to apply router config: {exc}", "error")
+            except Exception as exc:  # noqa: BLE001
+                log(f"Unexpected error applying router config: {type(exc).__name__}: {exc}", "error")
+            finally:
+                # Also after a failure part-way: record whatever did change.
+                try:
+                    if before is not None:
+                        entry = router_changes.record(changes_key, before, read_nat(), commands)
+                        job.emit({"type": "router_changes", "added": len(entry["added"]), "removed": len(entry["removed"])})
+                        if entry["added"] or entry["removed"]:
+                            log(f"This app has now added {len(entry['added'])} and removed {len(entry['removed'])} NAT rule(s) on this router. "
+                                "Network > Fix router config > 'Undo this app's changes' puts them back.", "info")
+                except Exception as exc:  # noqa: BLE001
+                    log(f"Couldn't record the change for undo: {exc}", "warning")
+                finally:
+                    job.finish()
 
         job.thread = threading.Thread(target=run, daemon=True)
         job.thread.start()
@@ -997,6 +1030,23 @@ class LabStatusRequest(BaseModel):
     sudo_password: Optional[str] = None
 
 
+class HealthCheckRequest(BaseModel):
+    """Either a facility room (``room_number``; blank passwords use the
+    sidebar/saved lab ones) or any device by address (``host``; its own
+    login, never saved). Blank ``sudo_password`` on a device = its SSH one."""
+    room_number: Optional[int] = None
+    host: Optional[str] = Field(default=None, max_length=253)
+    port: int = Field(default=22, ge=1, le=65535)
+    username: Optional[str] = Field(default=None, max_length=64)
+    ssh_password: Optional[str] = None
+    sudo_password: Optional[str] = None
+
+
+# Hostname or IPv4/IPv6 literal; no spaces, options or shell characters.
+_HOST_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,251}[A-Za-z0-9])?$|^[0-9A-Fa-f:]+$")
+_USER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.\-]{0,63}$")
+
+
 class StreamLogsRequest(BaseModel):
     room_number: int
     service: str  # "matrix" | "nms" | an explicit systemd unit name
@@ -1082,7 +1132,8 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                 "name": r.name,
                 "secondary": r.secondary,
                 "demonstrator_url": r.demonstrator_gui_url(router_ip),
-                "web_app_url": r.web_app_url(router_ip),
+                # Reached through the API forward, which only QA labs have.
+                "web_app_url": r.web_app_url(router_ip) if app_config.connection.qa_port_forwards else None,
             }
             for r in app_config.rooms
         ]
@@ -1099,24 +1150,31 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             "same_physical_host": conn.same_physical_host,
         }
 
-    def _router_nat_plan(config: AppConfig):
+    def _qa_view() -> bool:
+        """QA features show on this computer: team isn't Integration and the
+        QA lock (if any) is open. Same rule as ``applyTeam`` in app.js."""
+        return load_merged_env(app_config.path)[0].get("team") != "integration" and qa_status()["unlocked"]
+
+    def _router_nat_plan(config: AppConfig, qa: Optional[bool] = None):
         """Return ``(rooms, commands)``: the per-room forwards and the flat
         list of ``ip nat inside source static`` lines for the active router.
-        API (10000+n) is the facility forward every site gets; SSH/SWU/NMS are
-        QA test access, only planned when ``qa_port_forwards`` is on."""
+        SSH (200+n) and NMS (11000+n) are what this app needs in every lab
+        (room SSH, Facility check, Fiber Test); SWU (300+n) and API (10000+n)
+        are QA-only, planned only when ``qa_port_forwards`` is on and (unless
+        ``qa`` says otherwise) the QA features show on this computer."""
         conn = config.connection
         iface = conn.router_wan_interface
+        if qa is None:
+            qa = conn.qa_port_forwards and _qa_view()
         rooms = []
         commands = []
         for r in config.rooms:
-            kinds = [("api", 443, r.api_external_port(), "facility")]
-            if conn.qa_port_forwards:
-                kinds = [
-                    ("ssh", 22, r.ssh_port(conn.ssh_port_base), "qa"),
-                    ("swu", conn.swu_service_port, r.swu_external_port(conn.swu_port_base), "qa"),
-                    *kinds,
-                    ("nms", 8443, r.nms_external_port(conn.nms_port_base), "qa"),
-                ]
+            kinds = [
+                ("ssh", 22, r.ssh_port(conn.ssh_port_base), "facility"),
+                *([("swu", conn.swu_service_port, r.swu_external_port(conn.swu_port_base), "qa"),
+                   ("api", 443, r.api_external_port(), "qa")] if qa else []),
+                ("nms", 8443, r.nms_external_port(conn.nms_port_base), "facility"),
+            ]
             forwards = {k: {"inside_port": ip, "outside_port": op, "source": src} for k, ip, op, src in kinds}
             rooms.append({"number": r.number, "name": r.name, "room_id": r.room_id, "forwards": forwards})
             commands.extend(
@@ -1138,7 +1196,11 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             "site_name": app_config.site_name,
             "router_ip": conn.router_ip,
             "wan_interface": conn.router_wan_interface,
+            # Groups / access rules / NAT policy / routes (not checked yet).
+            "policy": _policy_compare(None),
             "qa_port_forwards": conn.qa_port_forwards,
+            # False for the Integration team (or QA locked): no SWU/API forwards.
+            "qa_forwards_shown": conn.qa_port_forwards and _qa_view(),
             "rooms": rooms,
             "nat_script": nat_script,
             "facility": {
@@ -1172,11 +1234,31 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                     return f"OR {v['room']} network device {service}"
         return service
 
+    def _policy_compare(live: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """The router's groups / access rules / NAT policy / routes / hardening:
+        the planner's router config when the lab has one stored, else the
+        standard Matrix router template; compared with ``live`` when given."""
+        fac = app_config.facility or {}
+        stored = (fac.get("router") or {}).get("policy")
+        plan = stored or router_policy.standard_plan(app_config.connection.router_wan_interface)
+        uplinks = {v["ip"]: f"{sw.get('name') or 'switch'} uplink" for sw in fac.get("switches") or []
+                   for v in sw.get("vlans", []) if v.get("kind") == "uplink" and v.get("ip")}
+        rooms = [{"name": r.name, "room_id": r.room_id} for r in app_config.rooms]
+        result = router_policy.compare(plan, live, rooms=rooms, uplinks=uplinks)
+        result["source"] = ({"kind": "plan", "version": fac.get("version"), "file": fac.get("source_file")} if stored
+                            else {"kind": "standard", "facility": bool(fac)})
+        return result
+
     # Live router NAT rules per lab (profile path), from the last router read.
     live_nat_cache: Dict[str, List[Dict[str, Any]]] = {}
+    # Parsed groups / rules / routes from the same read (no secrets).
+    live_policy_cache: Dict[str, Dict[str, Any]] = {}
 
     def _read_router_nat(req: Optional[RouterLiveRequest] = None) -> List[Dict[str, Any]]:
-        """Read-only: the router's static NAT rules (never enters config mode)."""
+        """Read-only: the router's static NAT rules (never enters config mode).
+        Reads the whole running-config (same ~1 s as the filtered one) so the
+        groups / access rules / routes come from the same read; only the
+        parsed, secret-free parts are kept."""
         req = req or RouterLiveRequest()
         env, secrets = load_merged_env(app_config.path)
         # Planner sites use the router's "admin" account.
@@ -1184,20 +1266,29 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         password = req.router_admin_password or secrets.get("router_admin_password")
         enable = req.router_enable_password or secrets.get("router_enable_password")
         if not password:
-            raise HTTPException(status_code=400, detail="No router login saved for this lab. Add it under Settings > Edit saved credentials > Router, switches & Windows.")
+            raise HTTPException(status_code=400, detail="No router password saved for this lab. Click 'Enter router & switch passwords' (Settings > Edit saved credentials > Router & switches).")
         try:
             # Routers in other labs may run older Cisco IOS (SHA-1 only).
             client = connect(SSHTarget(host=app_config.connection.router_ip, port=22, username=user, password=password), try_keys=False, sha1="fallback")
         except SSHError as exc:
-            raise HTTPException(status_code=502, detail=f"Couldn't log in to the router: {exc}")
+            raise HTTPException(status_code=502, detail=(
+                f"Couldn't log in to the router at {app_config.connection.router_ip}: {exc}. If it isn't answering at all, "
+                "the router isn't on the network - see Settings > Setup Check > Lab router."))
         try:
-            out = run_cisco_show(client, ["show running-config | include ip nat inside source static"], enable_password=enable)
+            out = run_cisco_show(client, ["show running-config"], enable_password=enable)
         except SSHError as exc:
             raise HTTPException(status_code=502, detail=str(exc))
+        except (EOFError, OSError, paramiko.SSHException) as exc:
+            raise HTTPException(status_code=502, detail=f"The router closed the SSH session while reading its config ({type(exc).__name__}). Try again.")
         finally:
             client.close()
+        if "Current configuration" not in out and "hostname" not in out:
+            raise HTTPException(status_code=502, detail=(
+                "The router didn't show its running-config (the account may need privilege 15 or an enable password: "
+                "Settings > Edit saved credentials > Router & switches)."))
         live = [r for line in out.splitlines() if (r := facility_mod.parse_nat_line(line.strip()))]
         live_nat_cache[app_config.path or ""] = live
+        live_policy_cache[app_config.path or ""] = router_policy.parse(out)
         return live
 
     @app.post("/api/router/live-nat")
@@ -1219,10 +1310,34 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                     # What the router actually forwards this port to instead.
                     conflicts[str(f["outside_port"])] = {"inside_ip": got["inside_ip"], "inside_port": got["inside_port"],
                                                          "label": _nat_target_label(got["inside_ip"], got["inside_port"])}
-        other = sorted((r for r in live if r["outside_port"] not in planned), key=lambda r: r["outside_port"])
+        # QA forwards hidden on this computer aren't checked or listed either.
+        hidden = {f["outside_port"] for room in _router_nat_plan(app_config, qa=app_config.connection.qa_port_forwards)[0]
+                  for f in room["forwards"].values()} - planned
+        other = sorted((r for r in live if r["outside_port"] not in planned | hidden), key=lambda r: r["outside_port"])
         for r in other:
             r["label"] = _nat_target_label(r["inside_ip"], r["inside_port"])
-        return {"checked_at": time.time(), "rule_count": len(live), "status": status, "conflicts": conflicts, "other": other}
+        return {"checked_at": time.time(), "rule_count": len(live) - sum(r["outside_port"] in hidden for r in live),
+                "status": status, "conflicts": conflicts, "other": other,
+                "policy": _policy_compare(live_policy_cache.get(app_config.path or ""))}
+
+    def _router_changes_key() -> str:
+        return f"{app_config.path or ''}|{app_config.connection.router_ip}"
+
+    @app.get("/api/router/changes")
+    def router_changes_get() -> Dict[str, Any]:
+        """NAT rules this app added/removed on the active router (recorded by
+        Apply to Router) and the commands that put the router back."""
+        entry = router_changes.load(_router_changes_key())
+        return {**entry, "commands": router_changes.undo_commands(entry)}
+
+    @app.post("/api/router/changes/forget")
+    def router_changes_forget() -> Dict[str, Any]:
+        """Drop the record (e.g. the rules were put back by hand)."""
+        try:
+            router_changes.forget(_router_changes_key())
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Couldn't update the record: {exc}")
+        return {"added": [], "removed": [], "commands": []}
 
     def _device_label(ip: Optional[str]) -> str:
         """Name a device seen on a switch port from what the lab profile knows."""
@@ -1265,7 +1380,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                 return {**base, "error": "No SSH forward to this switch on the router."}
             password = raw.get(f"MATRIX_SWITCH_{i}_PASSWORD") or secrets.get("switch_password")
             if not password:
-                return {**base, "error": "No switch password saved for this lab (Edit saved credentials > Router, switches & Windows)."}
+                return {**base, "error": "No switch password saved for this lab. Click 'Enter router & switch passwords' (Settings > Edit saved credentials > Router & switches)."}
             try:
                 data = switch_status.read_switch(app_config.connection.router_ip, fwd["outside_port"], user, password, fiber=fiber)
             except SSHError as exc:
@@ -1399,9 +1514,10 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
                     "Not allowed: " + "; ".join(rejected[:5]) + (" ..." if len(rejected) > 5 else "")))
             if not commands:
                 raise HTTPException(status_code=400, detail="No NAT rules to apply - pick at least one rule.")
-        user = req.router_admin_username or load_merged_env(app_config.path)[0].get("router_admin_username")
+        # Same login as Check live router (planner sites use "admin").
+        user = req.router_admin_username or load_merged_env(app_config.path)[0].get("router_admin_username") or "admin"
         password = req.router_admin_password or _saved("router_admin_password")
-        if not user or not password:
+        if not password:
             raise HTTPException(status_code=400, detail="Enter the router SSH username and password (or save them under Settings > Edit saved credentials).")
         job = jobs.start_router_apply(
             app_config.connection.router_ip,
@@ -1409,6 +1525,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             password,
             req.router_enable_password or _saved("router_enable_password"),
             commands,
+            changes_key=_router_changes_key(),
         )
         return {"job_id": job.id}
 
@@ -1473,6 +1590,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         _, env_path = active_env_paths(app_config.path)
         env, secrets = load_merged_env(app_config.path)
         conn = app_config.connection
+        switch_count = len((app_config.facility or {}).get("switches") or [])
         return {
             "connection": {
                 "router_ip": conn.router_ip,
@@ -1496,10 +1614,12 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             },
             # Only whether each one is saved: the values stay on the server,
             # which fills them in when a request leaves the field blank.
-            "saved": {k: bool(secrets.get(k)) for k in (
+            "saved": {**{k: bool(secrets.get(k)) for k in (
                 "ssh_password", "sudo_password", "artifactory_token", "jenkins_token", "router_admin_password",
-                "router_enable_password", "windows_password", "switch_password")},
-            "facility": {k: (app_config.facility or {}).get(k) for k in ("site_code", "facility_name", "version", "source_file")}
+                "router_enable_password", "windows_password")},
+                "switch_password": switch_passwords_saved(app_config.path, switch_count)},
+            "facility": {**{k: (app_config.facility or {}).get(k) for k in ("site_code", "facility_name", "version", "source_file")},
+                         "switch_count": switch_count}
             if app_config.facility else None,
             "qa": qa_status(),
             "env_path": str(env_path),
@@ -1740,6 +1860,45 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
         creds = _creds(req)
         return collect_room_sfp(app_config, creds, room)
 
+    @app.post("/api/health-check")
+    def health_check(req: HealthCheckRequest) -> Dict[str, Any]:
+        """Read-only hardware health report (storage/SMART, memory, CPU and
+        thermals, network links, update readiness) for one facility room or
+        any device by address. A device's typed login is used for this
+        request only and never saved."""
+        conn = app_config.connection
+        services = (conn.service_name, conn.nms_service_name)
+        if req.room_number is not None:
+            room = _one_room(req.room_number)
+            creds = _creds(req)
+            if not creds.ssh_password:
+                raise HTTPException(status_code=400, detail="Enter the SSH password in the sidebar (or save it for this lab).")
+            target = Deployer(app_config, creds, log=lambda m, lvl: None, progress=lambda s, t: None,
+                              is_cancelled=lambda: False)._target(room)
+            label = f"OR {room.number}" + (f" - {room.name}" if room.name and room.name != f"OR {room.number}" else "")
+            return collect_device_health(target, label, services, conn.swu_service_port)
+        host = (req.host or "").strip()
+        user = (req.username or "").strip()
+        if not host or not _HOST_RE.match(host):
+            raise HTTPException(status_code=400, detail="Enter the device's IP address or hostname.")
+        if not user or not _USER_RE.match(user):
+            raise HTTPException(status_code=400, detail="Enter a valid SSH username.")
+        if not req.ssh_password:
+            raise HTTPException(status_code=400, detail="Enter the device's SSH password.")
+        target = SSHTarget(host=host, port=req.port, username=user, password=req.ssh_password,
+                           sudo_password=req.sudo_password or req.ssh_password)
+        return collect_device_health(target, f"{user}@{host}" + (f":{req.port}" if req.port != 22 else ""),
+                                     services, conn.swu_service_port)
+
+    @app.get("/api/tools/health-check.ps1")
+    def health_check_script() -> FileResponse:
+        """The Windows health check script, to copy onto a device (the
+        packaged app ships it in tools\\, a source checkout in tools/health-check/)."""
+        for path in (app_dir() / "tools" / "MatrixHealthCheck.ps1", app_dir() / "tools" / "health-check" / "MatrixHealthCheck.ps1"):
+            if path.is_file():
+                return FileResponse(path, filename="MatrixHealthCheck.ps1", media_type="application/octet-stream")
+        raise HTTPException(status_code=404, detail="MatrixHealthCheck.ps1 isn't in this app's tools folder.")
+
     @app.post("/api/jobs/stream-logs")
     def start_stream_logs(req: StreamLogsRequest) -> Dict[str, str]:
         room = _one_room(req.room_number)
@@ -1933,11 +2092,14 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
             raise HTTPException(status_code=502, detail=f"Failed to open tunnel: {exc}")
         try:
             targets = _devtools_targets(t.base, 10 if req.app == "admin" else 1)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             tunnels.close(t.id)
+            # The proxy answers 502 when the room refuses the DevTools port.
+            refused = getattr(getattr(exc, "response", None), "status_code", None) == 502
             raise HTTPException(
                 status_code=502,
-                detail=f"DevTools is off for the {app_name} on OR {room.number} - click Enable DevTools first.",
+                detail=f"DevTools is off for the {app_name} on OR {room.number} - click Enable DevTools first." if refused
+                else f"DevTools for the {app_name} on OR {room.number} didn't answer through the tunnel ({type(exc).__name__}). Try again.",
             )
         targets = largest_page_first(targets)
         repaired = False
@@ -2079,9 +2241,7 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
 
     @app.get("/favicon.ico", include_in_schema=False)
     def favicon():
-        # The app has no icon; answer browsers' automatic /favicon.ico request
-        # with "no content" instead of a 404 in the console log.
-        return Response(status_code=204)
+        return FileResponse(STATIC_DIR / "app-icon.ico", media_type="image/x-icon")
 
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
     # Outermost, so it also covers WebSockets and error responses.

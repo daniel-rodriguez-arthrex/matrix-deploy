@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import os
 import re
+import shlex
 import socket
 import threading
 import time
@@ -369,7 +370,7 @@ def get_disk_free_kb(client: paramiko.SSHClient, path: str = "/tmp") -> Optional
     second line. Returns ``None`` if the command fails or output can't be
     parsed.
     """
-    stdin, stdout, stderr = client.exec_command(f"df -Pk {path}")
+    stdin, stdout, stderr = client.exec_command(f"df -Pk {shlex.quote(path)}")
     output = stdout.read().decode(errors="replace").strip()
     exit_status = stdout.channel.recv_exit_status()
     if exit_status != 0 or not output:
@@ -456,7 +457,11 @@ def run_cisco_config_commands(
     and streams each line to ``log`` as it arrives.
 
     Raises ``SSHError`` if the device asks for an enable password that
-    wasn't provided.
+    wasn't provided, if ``write memory`` doesn't report ``[OK]``, or (after
+    saving the lines that worked) if the router rejected any line.
+
+    Cisco IOS ends the whole SSH connection when its shell closes, so the
+    ``client`` can't be used for anything after this call.
     """
     return _cisco_session(client, commands, enable_password, log, configure=True)
 
@@ -468,7 +473,9 @@ def run_cisco_show(
 ) -> str:
     """Read-only counterpart of ``run_cisco_config_commands``: enters
     privileged EXEC (``show running-config`` needs it), runs each ``show``
-    command and returns the transcript. Never enters config mode."""
+    command and returns the transcript. Never enters config mode. Like the
+    config session, IOS closes the connection afterwards: one call per
+    ``connect()``."""
     return _cisco_session(client, commands, enable_password, None, configure=False)
 
 
@@ -476,6 +483,12 @@ def run_cisco_show(
 # EXOS "* QALAB-Switch1.3 # ". Banner art like "####" doesn't match.
 _PROMPT_RE = re.compile(r"(?:^|\n)\*?\s*[\w.\-()/:]+ ?[#>]\s*$")
 _PASSWORD_PROMPT_RE = re.compile(r"[Pp]assword:\s*$")
+# IOS yes/no questions, e.g. removing a static NAT rule that has live
+# translations: "%Static entry in use, do you want to delete child entries? [no]:".
+_CONFIRM_RE = re.compile(r"(\[(yes|no)\]:?|\[yes/no\]:?|\[confirm\])\s*$", re.I)
+# IOS reports a refused line with a "%" message ("% Invalid input detected ...").
+# Syslog lines ("%SYS-5-CONFIG_I: ...") aren't errors.
+_IOS_ERROR_RE = re.compile(r"^\s*%\s*(?!Static entry in use)(?![A-Z0-9_]+-\d-[A-Z0-9_]+:)(.+)$", re.M)
 
 
 def _read_until_prompt(chan, timeout: float, also: Optional["re.Pattern[str]"] = None) -> str:
@@ -520,7 +533,8 @@ def run_cli_show(client: paramiko.SSHClient, commands: list, setup: tuple = (), 
 
 
 def _cisco_session(client, commands, enable_password, log, configure: bool) -> str:
-    chan = client.invoke_shell()
+    # Wide terminal: at 80 columns IOS scrolls long NAT lines ("inter$de ...") in the echo.
+    chan = client.invoke_shell(width=250)
     chan.settimeout(10)
     transcript: list = []
 
@@ -543,15 +557,18 @@ def _cisco_session(client, commands, enable_password, log, configure: bool) -> s
     # saved per router read). Config sessions keep the proven fixed timing.
     fast = not configure
 
-    def _send(cmd: str, wait: float = 0.8, until_prompt: bool = False) -> str:
+    def _send(cmd: str, wait: float = 0.8, until_prompt: bool = False, max_wait: float = 20) -> str:
         chan.send(cmd + "\n")
         if fast:
             out = _read_until_prompt(chan, 20, _PASSWORD_PROMPT_RE)
         else:
             out = _drain(wait)
-            # Long show output can trickle in; keep reading until the prompt is back.
-            deadline = time.time() + 20
-            while until_prompt and not out.rstrip().endswith(("#", ">")) and time.time() < deadline:
+            # Slow output can trickle in; keep reading until the prompt (or a question) is back.
+            deadline = time.time() + max_wait
+            while until_prompt and not (out.rstrip().endswith(("#", ">")) or _CONFIRM_RE.search(out)) \
+                    and time.time() < deadline:
+                if chan.closed or chan.exit_status_ready():
+                    break
                 out += _drain(0.5)
         transcript.append(out)
         if log:
@@ -560,6 +577,23 @@ def _cisco_session(client, commands, enable_password, log, configure: bool) -> s
                 if line:
                     log(line, "detail")
         return out
+
+    def _send_config(cmd: str) -> None:
+        out = _send(cmd, until_prompt=True)
+        if _CONFIRM_RE.search(out):
+            # Only NAT rule removals ask; deleting their live translations is
+            # what removing the rule means. Anything else: answer no.
+            answer = "yes" if cmd.startswith("no ") else "no"
+            if log:
+                log(f"Router asked to confirm; answering '{answer}'.", "info")
+            out += _send(answer, until_prompt=True)
+        for msg in _IOS_ERROR_RE.findall(out):
+            msg = msg.strip().rstrip(".")
+            rejected.append(f"{cmd} ({msg})")
+            if log:
+                log(f"Router rejected: {cmd} ({msg})", "error")
+
+    rejected: list = []
 
     try:
         banner = _read_until_prompt(chan, 10) if fast else _drain(1.2)
@@ -577,12 +611,21 @@ def _cisco_session(client, commands, enable_password, log, configure: bool) -> s
 
         _send("terminal length 0")
         if configure:
-            _send("configure terminal")
-        for command in commands:
-            _send(command, until_prompt=not configure)
-        if configure:
-            _send("end")
-            _send("write memory", wait=2.0)
+            if "(config" not in _send("configure terminal", until_prompt=True):
+                raise SSHError("The router didn't enter config mode (configure terminal); nothing was changed.")
+            for command in commands:
+                _send_config(command)
+            _send("end", until_prompt=True)
+            saved = _send("write memory", wait=2.0, until_prompt=True, max_wait=60)
+            if "[OK]" not in saved:
+                raise SSHError("The router didn't confirm 'write memory' ([OK]); the change may not survive a reboot. "
+                               "Check live router, then run 'write memory' on the router by hand.")
+            if rejected:
+                raise SSHError(f"The router rejected {len(rejected)} line(s): " + "; ".join(rejected[:5]) +
+                               (" ..." if len(rejected) > 5 else "") + ". Any other lines were applied and saved.")
+        else:
+            for command in commands:
+                _send(command, until_prompt=True)
     finally:
         chan.close()
 

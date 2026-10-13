@@ -261,6 +261,15 @@ def load_merged_env(profile_path=None) -> Tuple[Dict[str, str], Dict[str, str]]:
     )
 
 
+def switch_passwords_saved(profile_path, switch_count: int) -> bool:
+    """True if every switch of the lab has a password: the lab-wide one, or a
+    ``MATRIX_SWITCH_<i>_PASSWORD`` per switch (same lookup as server.py)."""
+    if load_merged_env(profile_path)[1].get("switch_password"):
+        return True
+    raw = parse_env_file(profile_env_path(profile_path)) if profile_path else {}
+    return switch_count > 0 and all(raw.get(f"MATRIX_SWITCH_{i}_PASSWORD") for i in range(switch_count))
+
+
 def load_env_secrets(path: Path | None = None) -> Dict[str, str]:
     """Load secret values from a .env file.
 
