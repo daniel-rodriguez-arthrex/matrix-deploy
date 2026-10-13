@@ -16,7 +16,7 @@ from typing import Optional
 
 PREFIX = "dpapi:"
 # Ties the ciphertext to this app (other DPAPI users can't decrypt it without
-# it). build_exe.ps1 uses the same bytes to decrypt lab passwords it ships.
+# it). Changing it makes every saved value unreadable.
 _ENTROPY = b"matrix-facility-manager"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x1
 AVAILABLE = sys.platform == "win32"

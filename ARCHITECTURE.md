@@ -464,7 +464,7 @@ contains the secrets themselves.
 | Another program or Windows user on your PC | Some other process calls the local API | Per-launch sign-in token |
 | A fake or swapped device on the lab network | Something answers on a room's IP pretending to be it | Saved SSH host keys and NMS certificates |
 | Other accounts on a room | Another login on the room reads files or the process list | sudo via stdin, owner-only staging folders |
-| Someone who gets the shared zip | A copy of `MatrixDeploy.zip` leaks | Only lab passwords ship, encrypted after first run; no personal tokens |
+| Someone who gets the shared zip | A copy of `MatrixDeploy.zip` leaks | No labs, passwords or tokens ship; lab access comes from each site's facility zip |
 | Mistakes | Applying the wrong router config, or running a QA action by accident | NAT-only allowlist, confirmations, QA lock |
 
 ### 9b. Every request to the local server

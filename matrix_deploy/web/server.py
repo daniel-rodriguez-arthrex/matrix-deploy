@@ -1058,8 +1058,8 @@ def create_app(config: Optional[AppConfig] = None, api_token: Optional[str] = No
     """Build the FastAPI app. ``config`` defaults to ``AppConfig.load()``.
     ``api_token``: see ``LocalOnlyGuard`` (``None`` = no sign-in, for tests)."""
     app_config = config or AppConfig.load()
-    # Encrypt plaintext saved secrets (hand-edited, or lab passwords shipped
-    # in the build) for this Windows user before anything else reads them.
+    # Encrypt plaintext saved secrets (hand-edited, or from an older build
+    # that shipped lab passwords) for this Windows user before anything else reads them.
     try:
         protect_env_files([default_env_path(), *config_dir().glob("*.env")])
     except OSError as exc:

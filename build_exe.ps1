@@ -3,12 +3,12 @@
 # Builds the localhost web UI (run_server.py) into dist\MatrixDeploy\ and zips
 # it to dist\MatrixDeploy.zip, ready to hand to coworkers. The folder contains:
 #   MatrixDeploy.exe, _internal\     the app (no Python install needed)
-#   config\<lab>.json                site profiles from config\
-#   config\<lab>.env                 shared lab SSH/sudo passwords ONLY (every
-#                                    other key in your lab .env is dropped)
-#   .env.example, START HERE.txt
-# Your root .env (personal Artifactory/Jenkins tokens) is NEVER copied; each
-# coworker enters their own in the app's Setup Check.
+#   config\deploy_config.example.json
+#   tools\MatrixHealthCheck.ps1, .env.example, START HERE.txt
+# No labs and no passwords ship: no config\<lab>.json, no config\<lab>.env, no
+# root .env. Each coworker imports the facility planner zip of the site they
+# work on (Settings > Facility config), which brings the lab layout and the
+# room SSH/sudo login; the app then asks for the router/switch passwords.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
@@ -17,9 +17,6 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
 $outRoot = Join-Path $PSScriptRoot "dist"
-# Lab .env files (from the Matrix Lab extension) also hold switch/router/
-# streaming passwords etc. Ship only the keys Matrix Deploy actually reads.
-$labKeysAllowed = '^\s*(export\s+)?(MATRIX_)?(SSH|SUDO)_PASSWORD\s*='
 
 # Build, assemble and zip in %TEMP%, then copy the results to dist\. The repo
 # lives under OneDrive, whose sync locks freshly written files and makes
@@ -84,41 +81,15 @@ Invoke-Native "PyInstaller" { python -m PyInstaller --noconfirm --clean --consol
   @qaLockArgs `
   run_server.py }
 
-# --- Site profiles + scrubbed lab credential files --------------------------
-# Saved passwords are DPAPI-encrypted for *your* Windows account
-# (matrix_deploy\secret_store.py), which no coworker can decrypt. Shipped lab
-# SSH/sudo passwords are decrypted here; each copy re-encrypts them for its
-# own user on first launch.
-Add-Type -AssemblyName System.Security
-$dpapiEntropy = [Text.Encoding]::UTF8.GetBytes("matrix-facility-manager")
-function Unprotect-EnvLine([string]$line) {
-  if ($line -notmatch '^(\s*(?:export\s+)?[^=]+=)\s*["'']?dpapi:([A-Za-z0-9+/=]+)["'']?\s*$') { return $line }
-  $keyPart = $Matches[1]
-  $bytes = [Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String($Matches[2]), $dpapiEntropy, 'CurrentUser')
-  $value = [Text.Encoding]::UTF8.GetString($bytes)
-  if ($value -ne $value.Trim() -or $value -match '^(["'']).*\1$') { $value = if ($value.Contains('"')) { "'$value'" } else { "`"$value`"" } }
-  return $keyPart + $value
-}
+# --- Config folder: the example only ----------------------------------------
+# Labs come from each coworker's own facility zip import, never from the build:
+# your lab profiles (router IPs, room layout) and passwords stay on this PC.
 $cfgOut = Join-Path $distDir "config"
 New-Item -ItemType Directory -Force $cfgOut | Out-Null
-$profiles = Get-ChildItem "config\*.json" | Where-Object { $_.Name -ne "deploy_config.example.json" }
-if (-not $profiles) { throw "No site profiles in config\ - nothing for coworkers to connect to." }
-foreach ($p in $profiles) {
-  Copy-Item $p.FullName $cfgOut
-  $labEnv = [IO.Path]::ChangeExtension($p.FullName, ".env")
-  if (Test-Path $labEnv) {
-    $kept = @("# Lab SSH/sudo passwords for $($p.BaseName) (shared lab credentials).") +
-      @(Get-Content $labEnv | Where-Object { $_ -match $labKeysAllowed } | ForEach-Object { Unprotect-EnvLine $_ })
-    Set-Content -Path (Join-Path $cfgOut (Split-Path $labEnv -Leaf)) -Value $kept -Encoding UTF8
-    Write-Host "  profile $($p.Name) + $(Split-Path $labEnv -Leaf) (SSH/sudo keys only)"
-  } else {
-    Write-Host "  profile $($p.Name) (no lab .env - coworkers will be asked for passwords)"
-  }
-}
 Copy-Item "config\deploy_config.example.json" $cfgOut
 Copy-Item ".env.example" (Join-Path $distDir ".env.example")
 # Windows device health check: copied on its own to field devices (never the
-# rest of this folder - it holds lab passwords).
+# rest of this folder - once used it holds that person's saved passwords).
 $toolsOut = Join-Path $distDir "tools"
 New-Item -ItemType Directory -Force $toolsOut | Out-Null
 Copy-Item "tools\health-check\MatrixHealthCheck.ps1" $toolsOut
@@ -146,19 +117,24 @@ MATRIX FACILITY MANAGER - QUICK START
    username is your login ID (shown on your Jenkins account page), not
    your email.
 
-4. Pick your lab from the "Site" dropdown at the top-left.
+4. Add your lab: Settings > Facility config > Import facility config (.zip),
+   and pick the facility planner export for your site
+   (<SITE>-version<N>.zip). Get it from your lead if you don't have it.
+   The app then asks for the router and switch passwords (not in the zip).
+   Repeat for each site you work on; switch between them with the "Site"
+   dropdown at the top-left. Until a lab is imported, only Health Check
+   (any device by address) works.
 
 5. Optional: set your own SWU download folder (and repo/dist folders if
    you use the Web App tab) under Settings > Local folders > Save folders.
 
-This zip contains the shared lab SSH/sudo passwords in plain text
-(config\<lab>.env). Only share it with people who should have that access,
-and delete the .zip once you've extracted it. On first launch the app
-encrypts them for your Windows account.
+This app zip contains no labs and no passwords. The facility zip does
+(room login, site passwords): don't forward it, and delete it once imported.
+The app never keeps a copy of it.
 
-Passwords and tokens you enter are saved encrypted (Windows DPAPI) in this
-folder, readable only by your Windows account on this computer. Still don't
-share the folder after you've entered your own tokens.
+Passwords and tokens are saved encrypted (Windows DPAPI) in this folder,
+readable only by your Windows account on this computer. Still don't share
+the folder once you've imported a lab or entered your own tokens.
 
 Troubleshooting
   - "Lab network" warning: connect to the lab network/VPN.
@@ -169,12 +145,15 @@ Troubleshooting
     restore it yourself. Contact IT.
 "@ | Set-Content -Path (Join-Path $distDir "START HERE.txt") -Encoding UTF8
 
-# --- Safety net: no personal tokens may ship --------------------------------
+# --- Safety net: no labs, passwords or tokens may ship ----------------------
+$labFiles = Get-ChildItem $distDir -Recurse -File -Force |
+  Where-Object { $_.FullName -notlike "*\_internal\*" -and ($_.Extension -eq ".env" -or
+    ($_.DirectoryName -eq $cfgOut -and $_.Name -ne "deploy_config.example.json")) }
+if ($labFiles) { throw "Refusing to package: $($labFiles[0].FullName) is a lab or password file. Labs come from each person's facility zip." }
 $leaks = Get-ChildItem $distDir -Recurse -File -Force |
   Where-Object { $_.FullName -notlike "*\_internal\*" -and $_.Name -ne ".env.example" } |
-  Select-String -Pattern '^\s*(export\s+)?(ARTIFACTORY_TOKEN|ARTIFACTORY_API_KEY|JENKINS_TOKEN)\s*=\s*\S'
-if ($leaks) { throw "Refusing to package: personal token found in $($leaks[0].Path)" }
-if (Test-Path (Join-Path $distDir ".env")) { throw "Refusing to package: a root .env ended up in the dist folder." }
+  Select-String -Pattern '^\s*(export\s+)?[A-Z0-9_]*(PASSWORD|TOKEN|API_KEY)\s*=\s*\S'
+if ($leaks) { throw "Refusing to package: a password or token was found in $($leaks[0].Path)" }
 if (-not (Test-Path (Join-Path $distDir "_internal\matrix_deploy\qa_lock.cfg"))) {
   throw "Refusing to package: the QA lock didn't make it into _internal\matrix_deploy\qa_lock.cfg."
 }

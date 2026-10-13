@@ -3006,7 +3006,7 @@ function renderNeedCreds() {
 }
 function maybeAskCreds() {
   const s = state.setup;
-  if (s && missingRequired(s).length && !credsSkipped.has(s.lab_env_path)) openCredsModal();
+  if (s && s.connection.room_count && missingRequired(s).length && !credsSkipped.has(s.lab_env_path)) openCredsModal();
 }
 
 /* ---------- Team (QA vs Integration) + QA lock ---------- */

@@ -1,6 +1,10 @@
 # Test-only tools (not shipped in the exe). Exact pins, like requirements.txt.
 -r requirements.txt
-pytest==8.4.2
+pytest==9.0.3
 pytest-cov==7.1.0
 coverage==7.16.2
 httpx==0.28.1
+# Security scans: bandit -r matrix_deploy run_server.py -x tests,dist
+# and pip-audit -r requirements.txt --ignore-vuln GHSA-r374-rxx8-8654 (see SECURITY.md section 11).
+bandit==1.9.4
+pip-audit==2.10.1

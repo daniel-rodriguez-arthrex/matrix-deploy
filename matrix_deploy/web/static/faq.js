@@ -92,7 +92,7 @@ window.FAQ_SECTIONS = [
         a: "Values you enter in the <b>Edit saved credentials</b> dialog are saved on this computer only, <b>encrypted for your Windows account</b>: lab " +
           "SSH/sudo passwords in <code>config\\&lt;lab&gt;.env</code>, and Artifactory/Jenkins in <code>.env</code> next to " +
           "<code>MatrixDeploy.exe</code>. Another Windows user or computer can't read them; if you copy the folder elsewhere, enter them again there. " +
-          "Passwords that are still plain text (the lab passwords that come with the zip, or ones typed into a <code>.env</code> by hand) are " +
+          "Passwords that are still plain text (ones typed into a <code>.env</code> by hand) are " +
           "encrypted the next time the app starts. Saved passwords are never sent to the app's window: a box with a saved one just says " +
           "<i>Saved - leave blank to use it</i>, and the app uses the saved value when you leave it empty. Type into it to use a different one " +
           "for now. Anything you type directly into the sidebar or tab fields stays in memory and is gone when you " +
@@ -387,7 +387,7 @@ window.FAQ_SECTIONS = [
       {
         q: "How do I check a Windows device?",
         a: "Choose <b>Health Check &rarr; A Windows device</b>: it walks you through it. Windows devices (e.g. Windows 10 IoT) run a small script, " +
-          "<code>MatrixHealthCheck.ps1</code> (also in the MatrixDeploy folder under <code>tools</code>). Copy only that file to the device, never the whole folder (it holds lab passwords)." +
+          "<code>MatrixHealthCheck.ps1</code> (also in the MatrixDeploy folder under <code>tools</code>). Copy only that file to the device, never the whole folder (it holds your saved passwords)." +
           "<ul>" +
           "<li>Click <b>Download MatrixHealthCheck.ps1</b>.</li>" +
           "<li><b>BeyondTrust:</b> upload it with <b>File Transfer</b> to <code>C:\\Users\\Public\\Documents</code>, then click <b>Copy command</b> and paste it into the " +

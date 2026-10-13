@@ -78,14 +78,17 @@ This builds the web UI into `dist\MatrixDeploy\` and zips it to
 | Item | Notes |
 |---|---|
 | `MatrixDeploy.exe`, `_internal\` | The app. Double-click to start. A console window shows status, and the UI opens in its own Chrome/Edge app window. |
-| `config\<lab>.json` | Every site profile in your `config\` folder. |
-| `config\<lab>.env` | **Only** `SSH_PASSWORD`/`SUDO_PASSWORD` (and `MATRIX_` aliases). All other keys in your lab `.env` are dropped. |
+| `config\deploy_config.example.json` | Example profile only. |
+| `tools\MatrixHealthCheck.ps1` | Windows device health check (copied to devices on its own). |
 | `START HERE.txt` | Quick start for coworkers. |
 
-Your root `.env` (personal Artifactory/Jenkins tokens) is **never** copied.
-The build fails if a token shows up anywhere in the output. Each coworker enters
-their own tokens in the app. They're saved to `.env` next to the exe on that
-coworker's machine.
+**No labs and no passwords ship.** Your lab profiles, lab `.env` files and
+root `.env` (personal Artifactory/Jenkins tokens) are never copied, and the
+build fails if a lab file, password or token shows up in the output. Each
+coworker imports the facility planner zip for their site (Settings > Facility
+config), which brings the lab layout and the room SSH/sudo login, then enters
+the router/switch passwords and their own tokens in the app. Everything is
+saved encrypted next to the exe on that coworker's machine.
 
 On every launch a **Setup Check** runs and shows under **Settings > Setup
 Check**, with a red banner when something is blocking. If the app can't start

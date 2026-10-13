@@ -47,9 +47,8 @@ gap.
 - Passwords you save (lab SSH/sudo, router, switch, Artifactory and Jenkins
   tokens) are stored in `.env` files **encrypted with Windows DPAPI**: only
   your Windows account on your computer can decrypt them.
-- Plain-text passwords (for example the shared lab passwords that come in the
-  app zip, or a value typed into a file by hand) are encrypted automatically
-  the next time the app starts.
+- Plain-text passwords (for example a value typed into a file by hand) are
+  encrypted automatically the next time the app starts.
 - Passwords you only type into the app's fields stay in memory and are gone
   when the app closes.
 - Saved passwords and tokens are only decrypted inside the app's server and
@@ -160,12 +159,19 @@ without the QA test port forwards**.
 
 ## 10. Sharing the app (the zip)
 
-- The zip **does** contain the shared lab SSH/sudo passwords in plain text so
-  coworkers can connect right away. Each copy encrypts them on first launch.
-  **Treat the zip like a password**: share it only with people who should have
-  lab access, and delete it once extracted.
-- The zip **never** contains your personal Artifactory/Jenkins tokens or your
-  own `.env`. The build checks this and stops if one slips in.
+- The app zip contains **no labs and no passwords**: no lab profiles (router
+  IPs, room layout), no lab `.env` files, no personal Artifactory/Jenkins
+  tokens and no `.env`. The build checks this and stops if one slips in. A
+  leaked app zip gives nobody access to anything.
+- **Access to a lab comes from its facility planner zip.** Each person
+  imports the zip for the site they work on (Settings > Facility config). It
+  brings the lab layout and the site passwords, including the room SSH/sudo
+  login, which are encrypted for that person's Windows account on import. The
+  router and switch passwords aren't in it; the app asks for them.
+- **Treat the facility zip like a password**: it holds the room login, site
+  API keys and the NMS CA private key in plain text. Only give it to people
+  who should have access to that site, don't forward it, and delete it once
+  imported. The app never keeps a copy.
 - The exe is a plain, visible console app. We deliberately don't hide the
   console or use tricks that security software flags. If SentinelOne
   quarantines it, the fix is IT allowlisting or signing, not code changes.
@@ -176,6 +182,44 @@ All third-party libraries are pinned to exact versions, and known security
 advisories were fixed at the last review. We accept one known issue on
 purpose: the SSH library still allows the older `ssh-rsa` signature, because
 the lab's Extreme switches only support that.
+
+### Accepted: paramiko 4.0.0 and SHA-1 `ssh-rsa`
+
+Scanners (pip-audit, Snyk, Dependabot) report this one advisory under three
+IDs. They are the same issue:
+
+- **CVE-2026-44405**
+- **GHSA-r374-rxx8-8654**
+- **PYSEC-2026-2858**
+
+**What it is:** paramiko (the SSH library) up to 4.0.0 still allows the
+`ssh-rsa` signature, which uses SHA-1. SHA-1 is weak enough that, in
+theory, an attacker could fake a device's SSH identity.
+
+**Why we can't upgrade:** paramiko 5.0 removed `ssh-rsa` host keys, and the
+lab's Extreme (EXOS) switches only offer `ssh-rsa`. Upgrading would mean the
+app can no longer read the switches (Network and Fiber Test tabs).
+
+**How we limit it:** SHA-1 is refused unless a connection opts in
+(`ssh_client.connect(..., sha1="refuse")` is the default):
+
+| Device | SHA-1 | Why |
+|---|---|---|
+| Rooms | Refused, always | They run modern OpenSSH and hold the secrets (sudo, NMS passwords, room configs). A room that only offers SHA-1 gets a "don't connect" error on purpose. |
+| Router | Only if it offers nothing better | Modern signatures are tried first (QA1's router uses `rsa-sha2-512`). |
+| Switches | Allowed | EXOS only supports `ssh-rsa`. The app only runs read-only `show` commands on switches and never changes their config. |
+
+On top of that, every device's SSH fingerprint is saved on first contact and
+the app refuses to connect if it changes (section 4).
+
+**Real-world risk: low.** Exploiting it means pretending to be a lab switch
+on the lab network, which needs a costly SHA-1 forgery. Even then the
+attacker only gets the switch password, not room or NMS secrets.
+
+**When to revisit:** when the switches get EXOS firmware that supports
+`rsa-sha2-256/512`, upgrade paramiko to 5.x and remove this exception.
+Running `pip-audit -r requirements.txt --ignore-vuln GHSA-r374-rxx8-8654`
+keeps this accepted issue out of the results without hiding anything new.
 
 ## 12. Source code
 
@@ -191,10 +235,10 @@ the lab's Extreme switches only support that.
 
 | Limit | Why we accept it |
 |---|---|
-| The shared lab passwords are in the zip in plain text. | Coworkers need to connect without a setup step. Mitigation: share the zip carefully, and it's encrypted after first launch. |
+| The facility planner zip holds site passwords in plain text. | It's the planner's export format. Mitigation: hand it only to people who should have that site, delete it once imported; the app encrypts what it imports and never keeps the zip. |
 | The QA lock is a deterrent, not full access control. | A desktop app can't fully protect itself from someone who controls the PC, and the room passwords already allow the same actions. |
 | Anyone already using your Windows account can use your saved passwords. | That's how Windows account encryption works; lock your PC when away. |
-| `ssh-rsa` is still allowed. | Required by the lab switches. |
+| `ssh-rsa` is still allowed (paramiko 4.0.0: CVE-2026-44405 / GHSA-r374-rxx8-8654 / PYSEC-2026-2858). | Required by the lab switches; refused for rooms. See section 11. |
 
 ## If something looks wrong
 

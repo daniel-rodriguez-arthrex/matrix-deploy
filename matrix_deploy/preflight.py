@@ -111,7 +111,7 @@ def run_preflight(
     if not profiles:
         add("profiles", "Site profiles", "warn" if config is not None and config.path is None else "error",
             f"No site profile (.json with 'connection' and 'rooms') found in {cfg_dir}.",
-            "Copy the lab profile files (e.g. qa1lab.json, qa2lab.json) into that config folder and restart.")
+            "Import your site's facility planner zip under Settings > Facility config.")
     else:
         add("profiles", "Site profiles", "ok", ", ".join(p.name for p in profiles))
 

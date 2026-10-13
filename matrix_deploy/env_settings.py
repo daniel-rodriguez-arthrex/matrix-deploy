@@ -5,7 +5,8 @@ Artifactory/Jenkins tokens) from the shared root ``.env`` and each site
 profile's sibling ``<lab>.env``. The web UI's credentials dialog writes back
 here via ``save_env_values``. Secret values are stored encrypted for the
 current Windows user (``secret_store``, DPAPI); plaintext ones (hand-edited,
-or shipped lab passwords) are encrypted by ``protect_env_file`` at startup.
+or from older builds that shipped lab passwords) are encrypted by
+``protect_env_file`` at startup.
 """
 
 from __future__ import annotations
