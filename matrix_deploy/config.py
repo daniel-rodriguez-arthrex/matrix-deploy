@@ -318,7 +318,9 @@ class AppConfig:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
 
         conn = ConnectionConfig(**data["connection"])
-        arti_data = dict(data["artifactory"])
+        # A lab imported from a planner zip on a fresh install has no
+        # Artifactory settings yet: load it like standalone (not set up).
+        arti_data = {"url": "", "repo": "", "build_path": "", **(data.get("artifactory") or {})}
         branches = tuple(
             ArtifactoryBranch(**b) for b in arti_data.pop("branches", []) or []
         )

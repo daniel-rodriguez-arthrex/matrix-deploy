@@ -193,7 +193,7 @@ def connect(target: SSHTarget, timeout: int = 10, try_keys: bool = True, sha1: s
         except (OSError, EOFError) as exc:
             # Timeout / refused / unreachable: another method would just
             # wait out the same timeout again.
-            raise SSHError(f"No answer from {target.host}:{target.port} ({exc or 'connection closed'})") from exc
+            raise SSHError(f"No answer from {target.host}:{target.port} ({str(exc) or 'connection closed'})") from exc
 
     password_error: Optional[Exception] = None
     if target.password:

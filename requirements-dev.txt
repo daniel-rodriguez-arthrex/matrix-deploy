@@ -1,0 +1,6 @@
+# Test-only tools (not shipped in the exe). Exact pins, like requirements.txt.
+-r requirements.txt
+pytest==8.4.2
+pytest-cov==7.1.0
+coverage==7.16.2
+httpx==0.28.1

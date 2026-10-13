@@ -1,0 +1,12 @@
+[run]
+source =
+    matrix_deploy
+    run_server
+
+[report]
+show_missing = true
+skip_covered = true
+fail_under = 80
+exclude_lines =
+    pragma: no cover
+    if __name__ == .__main__.:

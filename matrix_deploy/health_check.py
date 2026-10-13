@@ -133,7 +133,7 @@ case "$root_src" in
     fi ;;
 esac
 for f in /sys/class/mmc_host/*/mmc*/life_time /sys/block/mmcblk*/device/life_time; do
-  [ -r "$f" ] && echo "mmc|$f|$(cat "$f" 2>/dev/null | tr -d ' ')"
+  [ -r "$f" ] && echo "mmc|$f|$(tr -s ' \n' '  ' < "$f" 2>/dev/null)"
 done
 disks=""
 if command -v lsblk >/dev/null 2>&1; then
@@ -828,8 +828,10 @@ def _eval_disk(lines: List[str], journal_readable: bool) -> Dict[str, Any]:
                                "fsck left recovered files in lost+found - the filesystem was corrupted at some point.",
                                "The disk was corrupted before. If other disk checks also warn, replace the disk."))
     for f in _tagged(lines, "mmc"):
-        if len(f) >= 3:
-            vals = [int(v, 16) for v in f[2].split() if re.fullmatch(r"0[xX][0-9a-fA-F]+", v)]
+        # "mmc|<life_time path>|0x01 0x02" (older collectors glued the values: "0x010x02").
+        if len(f) >= 2:
+            raw_life = f[1].strip()
+            vals = [int(v, 16) for v in re.findall(r"0[xX][0-9a-fA-F]{2}", raw_life)]
             worst = max(vals) if vals else 0
             state = "bad" if worst >= 0x0A else "warn" if worst >= 0x08 else "ok"
             if worst:
@@ -841,7 +843,9 @@ def _eval_disk(lines: List[str], journal_readable: bool) -> Dict[str, Any]:
                     score.cap(30, "the built-in flash storage is worn out")
                 elif worst >= 0x08:
                     score.hit(20, "the built-in flash storage is wearing out")
-            items.append(_item(f"Flash storage wear ({f[0].split('/')[-2]})", f"{f[2]} (0x0B = worn out)", state, "",
+            parts = f[0].split("/")
+            name = parts[-3] if len(parts) >= 3 and parts[-2] == "device" else parts[-2] if len(parts) >= 2 else f[0]
+            items.append(_item(f"Flash storage wear ({name})", f"{raw_life} (0x0B = worn out)", state, "",
                                "The built-in flash storage is wearing out: plan to replace the device."))
 
     errs = _int(_kv(lines).get("disk_err_30d"), 0) or 0

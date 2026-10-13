@@ -30,6 +30,13 @@ build/
 dist/
 # PyInstaller regenerates this on every build_exe.ps1 run; not needed in git
 *.spec
+# Test / coverage output
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+# Security scan output (bandit)
+bandit-report.*
 
 # OS
 .DS_Store
